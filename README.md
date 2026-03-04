@@ -27,7 +27,7 @@ Next.js applications on a single Ubuntu 22.04+ server.
 See [DEPLOYMENT.md](./DEPLOYMENT.md) for the full installation guide.
 
 ```bash
-git clone https://github.com/youruser/panel.git /opt/panel
+git clone https://github.com/freddiehdxd/panel.git /opt/panel
 bash /opt/panel/scripts/setup_panel.sh
 ```
 

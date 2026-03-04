@@ -13,7 +13,7 @@
 
 ```bash
 # 1. Clone the panel repo to your server
-git clone https://github.com/youruser/panel.git /opt/panel
+git clone https://github.com/freddiehdxd/panel.git /opt/panel
 
 # 2. Run the setup script (as root)
 cd /opt/panel
