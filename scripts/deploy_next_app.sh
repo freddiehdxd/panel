@@ -37,22 +37,55 @@ else
   git clone --branch "${BRANCH}" --depth 1 "${REPO_URL}" "${APP_DIR}"
 fi
 
-# ── Install dependencies ───────────────────────────────────────────────────
-echo "[panel] Installing dependencies..."
 cd "${APP_DIR}"
 
-# Use npm ci if lock file exists, otherwise npm install
+# ── Validate this is a Node.js project ────────────────────────────────────
+if [ ! -f "package.json" ]; then
+  echo "[error] No package.json found in repository root" >&2
+  exit 1
+fi
+
+# ── Install dependencies ───────────────────────────────────────────────────
+echo "[panel] Installing dependencies..."
 if [ -f "package-lock.json" ]; then
   npm ci
 else
   npm install
 fi
 
+# ── Ensure scripts exist in package.json ──────────────────────────────────
+HAS_BUILD=$(node -e "const p=require('./package.json'); process.stdout.write(p.scripts&&p.scripts.build?'yes':'no')")
+HAS_START=$(node -e "const p=require('./package.json'); process.stdout.write(p.scripts&&p.scripts.start?'yes':'no')")
+
+# Add missing build script (next build)
+if [ "$HAS_BUILD" = "no" ]; then
+  echo "[panel] No build script found — adding 'next build'..."
+  node -e "
+    const fs = require('fs');
+    const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+    pkg.scripts = pkg.scripts || {};
+    pkg.scripts.build = 'next build';
+    fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2));
+  "
+fi
+
+# Add missing start script (next start on the allocated port)
+if [ "$HAS_START" = "no" ]; then
+  echo "[panel] No start script found — adding 'next start'..."
+  node -e "
+    const fs = require('fs');
+    const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+    pkg.scripts = pkg.scripts || {};
+    pkg.scripts.start = 'next start -p \${PORT:-${PORT}}';
+    fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2));
+  "
+fi
+
 # ── Build ──────────────────────────────────────────────────────────────────
 echo "[panel] Building Next.js app..."
 NODE_ENV=production npm run build
 
-# Verify build succeeded
+# Verify .next was produced
 if [ ! -d "${APP_DIR}/.next" ]; then
   echo "[error] Build failed — .next directory not found" >&2
   exit 1
@@ -82,19 +115,6 @@ module.exports = {
   }],
 };
 EOF
-
-# Ensure package.json has a start script pointing to the right port
-# Next.js start respects PORT env var, so we just need `next start`
-if ! grep -q '"start"' "${APP_DIR}/package.json"; then
-  echo "[panel] Adding start script to package.json..."
-  node -e "
-    const fs = require('fs');
-    const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
-    pkg.scripts = pkg.scripts || {};
-    pkg.scripts.start = 'next start -p \${PORT:-${PORT}}';
-    fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2));
-  "
-fi
 
 # ── Start or reload with PM2 ──────────────────────────────────────────────
 if pm2 describe "${APP_NAME}" &>/dev/null; then
