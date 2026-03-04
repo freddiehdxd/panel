@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# install_postgres.sh — Install PostgreSQL 16 and create panel DB
+# install_postgres.sh — Install PostgreSQL and create panel DB/user
 set -euo pipefail
 
 PANEL_DB_USER="${PANEL_DB_USER:-paneluser}"
@@ -14,9 +14,23 @@ apt-get install -y postgresql postgresql-contrib
 systemctl enable postgresql
 systemctl start postgresql
 
+# ── Wait for PostgreSQL to be ready ───────────────────────────────────────
+echo "[panel] Waiting for PostgreSQL to be ready..."
+for i in $(seq 1 30); do
+  if sudo -u postgres pg_isready -q 2>/dev/null; then
+    echo "  ✓ PostgreSQL ready (${i}s)"
+    break
+  fi
+  if [ "$i" -eq 30 ]; then
+    echo "[error] PostgreSQL did not become ready in 30 seconds" >&2
+    exit 1
+  fi
+  sleep 1
+done
+
+# ── Create user and database ───────────────────────────────────────────────
 echo "[panel] Creating panel database and user..."
 
-# Run as postgres superuser
 sudo -u postgres psql -v ON_ERROR_STOP=1 <<-SQL
   DO \$\$
   BEGIN
@@ -32,4 +46,4 @@ sudo -u postgres psql -v ON_ERROR_STOP=1 <<-SQL
 SQL
 
 echo "[panel] PostgreSQL ready."
-echo "  Connection string: postgresql://${PANEL_DB_USER}:${PANEL_DB_PASS}@localhost:5432/${PANEL_DB_NAME}"
+echo "  Connection: postgresql://${PANEL_DB_USER}:${PANEL_DB_PASS}@localhost:5432/${PANEL_DB_NAME}"

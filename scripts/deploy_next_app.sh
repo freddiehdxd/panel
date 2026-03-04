@@ -24,18 +24,6 @@ APP_DIR="${APPS_DIR}/${APP_NAME}"
 
 echo "[panel] Deploying ${APP_NAME} from ${REPO_URL} (${BRANCH}) on port ${PORT}"
 
-# ── Ensure Node.js + PM2 present ──────────────────────────────────────────
-if ! command -v node &>/dev/null; then
-  echo "[panel] Installing Node.js LTS..."
-  curl -fsSL https://deb.nodesource.com/setup_lts.x | bash -
-  apt-get install -y nodejs
-fi
-
-if ! command -v pm2 &>/dev/null; then
-  echo "[panel] Installing PM2..."
-  npm install -g pm2
-fi
-
 # ── Clone or pull ──────────────────────────────────────────────────────────
 if [ -d "${APP_DIR}/.git" ]; then
   echo "[panel] Pulling latest changes..."
@@ -52,11 +40,26 @@ fi
 # ── Install dependencies ───────────────────────────────────────────────────
 echo "[panel] Installing dependencies..."
 cd "${APP_DIR}"
-npm ci --prefer-offline 2>&1 || npm install 2>&1
+
+# Use npm ci if lock file exists, otherwise npm install
+if [ -f "package-lock.json" ]; then
+  npm ci
+else
+  npm install
+fi
 
 # ── Build ──────────────────────────────────────────────────────────────────
 echo "[panel] Building Next.js app..."
-npm run build 2>&1
+NODE_ENV=production npm run build
+
+# Verify build succeeded
+if [ ! -d "${APP_DIR}/.next" ]; then
+  echo "[error] Build failed — .next directory not found" >&2
+  exit 1
+fi
+
+# ── Log directory ──────────────────────────────────────────────────────────
+mkdir -p /var/log/panel
 
 # ── PM2 ecosystem file ─────────────────────────────────────────────────────
 cat > "${APP_DIR}/ecosystem.config.js" <<EOF
@@ -64,25 +67,38 @@ module.exports = {
   apps: [{
     name:    '${APP_NAME}',
     cwd:     '${APP_DIR}',
-    script:  'node_modules/.bin/next',
-    args:    'start -p ${PORT}',
+    script:  'npm',
+    args:    'start',
     env: {
       NODE_ENV: 'production',
       PORT:     '${PORT}',
     },
     max_memory_restart: '512M',
-    error_file:   '/var/log/panel/pm2-${APP_NAME}-error.log',
-    out_file:     '/var/log/panel/pm2-${APP_NAME}-out.log',
-    merge_logs:   true,
+    error_file:  '/var/log/panel/pm2-${APP_NAME}-error.log',
+    out_file:    '/var/log/panel/pm2-${APP_NAME}-out.log',
+    merge_logs:  true,
+    autorestart: true,
+    watch:       false,
   }],
 };
 EOF
 
-mkdir -p /var/log/panel
+# Ensure package.json has a start script pointing to the right port
+# Next.js start respects PORT env var, so we just need `next start`
+if ! grep -q '"start"' "${APP_DIR}/package.json"; then
+  echo "[panel] Adding start script to package.json..."
+  node -e "
+    const fs = require('fs');
+    const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+    pkg.scripts = pkg.scripts || {};
+    pkg.scripts.start = 'next start -p \${PORT:-${PORT}}';
+    fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2));
+  "
+fi
 
-# ── Start or restart with PM2 ──────────────────────────────────────────────
+# ── Start or reload with PM2 ──────────────────────────────────────────────
 if pm2 describe "${APP_NAME}" &>/dev/null; then
-  echo "[panel] Restarting existing PM2 process..."
+  echo "[panel] Reloading existing PM2 process..."
   pm2 reload "${APP_NAME}" --update-env
 else
   echo "[panel] Starting new PM2 process..."

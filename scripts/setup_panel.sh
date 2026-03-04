@@ -14,13 +14,19 @@ echo "========================================"
 echo "  Panel — Server Control Panel Setup"
 echo "========================================"
 
+# ── 0. Must run as root ────────────────────────────────────────────────────
+if [ "$EUID" -ne 0 ]; then
+  echo "[error] Please run as root" >&2
+  exit 1
+fi
+
 # ── 1. System dependencies ─────────────────────────────────────────────────
-echo "[1/8] Installing system dependencies..."
+echo "[1/9] Installing system dependencies..."
 apt-get update -qq
-apt-get install -y curl git openssl ufw
+apt-get install -y curl git openssl ufw build-essential
 
 # ── 2. Node.js LTS ────────────────────────────────────────────────────────
-echo "[2/8] Installing Node.js LTS..."
+echo "[2/9] Installing Node.js LTS..."
 if ! command -v node &>/dev/null; then
   curl -fsSL https://deb.nodesource.com/setup_lts.x | bash -
   apt-get install -y nodejs
@@ -28,35 +34,35 @@ fi
 echo "  Node: $(node -v)  NPM: $(npm -v)"
 
 # ── 3. PM2 ────────────────────────────────────────────────────────────────
-echo "[3/8] Installing PM2..."
+echo "[3/9] Installing PM2..."
 npm install -g pm2 --quiet
-pm2 startup systemd -u root --hp /root | tail -1 | bash || true
+# Generate and run the startup command so PM2 survives reboots
+env PATH="$PATH:/usr/bin" pm2 startup systemd -u root --hp /root 2>/dev/null | \
+  grep "sudo" | bash || true
 
 # ── 4. NGINX ──────────────────────────────────────────────────────────────
-echo "[4/8] Installing NGINX..."
+echo "[4/9] Installing NGINX..."
 bash "${PANEL_DIR}/scripts/install_nginx.sh"
 
 # ── 5. PostgreSQL ─────────────────────────────────────────────────────────
-echo "[5/8] Installing PostgreSQL..."
+echo "[5/9] Installing PostgreSQL..."
 PANEL_DB_USER="${PANEL_DB_USER}" \
 PANEL_DB_PASS="${PANEL_DB_PASS}" \
 PANEL_DB_NAME="${PANEL_DB_NAME}" \
   bash "${PANEL_DIR}/scripts/install_postgres.sh"
 
 # ── 6. Redis ──────────────────────────────────────────────────────────────
-echo "[6/8] Installing Redis..."
+echo "[6/9] Installing Redis..."
 bash "${PANEL_DIR}/scripts/install_redis.sh"
 
-# ── 7. Set up log dir and permissions ─────────────────────────────────────
-echo "[7/8] Setting up directories..."
+# ── 7. Directories and permissions ────────────────────────────────────────
+echo "[7/9] Setting up directories..."
 mkdir -p /var/www/apps /var/log/panel
 chmod 755 /var/www/apps
-
-# Make scripts executable
 chmod +x "${PANEL_DIR}"/scripts/*.sh
 
 # ── 8. Write .env files ───────────────────────────────────────────────────
-echo "[8/8] Writing configuration..."
+echo "[8/9] Writing configuration..."
 
 cat > "${PANEL_DIR}/backend/.env" <<EOF
 PORT=4000
@@ -76,43 +82,85 @@ EOF
 
 cat > "${PANEL_DIR}/frontend/.env.local" <<EOF
 BACKEND_URL=http://127.0.0.1:4000
+NEXT_PUBLIC_API_URL=http://127.0.0.1:4000
 EOF
 
-# ── Install panel dependencies and build ──────────────────────────────────
-echo "[panel] Installing backend dependencies..."
+# ── 9. Build and start ────────────────────────────────────────────────────
+echo "[9/9] Installing dependencies and building..."
+
+# Backend
+echo "  → Building backend..."
 cd "${PANEL_DIR}/backend"
 npm install
-
-echo "[panel] Building backend (TypeScript → dist/)..."
 npm run build
 
-echo "[panel] Installing frontend dependencies and building..."
+# Verify build output exists
+if [ ! -f "${PANEL_DIR}/backend/dist/index.js" ]; then
+  echo "[error] Backend build failed — dist/index.js not found" >&2
+  exit 1
+fi
+
+# Frontend
+echo "  → Building frontend..."
 cd "${PANEL_DIR}/frontend"
 npm install
 npm run build
 
-# ── Start panel with PM2 ──────────────────────────────────────────────────
-echo "[panel] Starting panel services with PM2..."
+# Verify .next exists
+if [ ! -d "${PANEL_DIR}/frontend/.next" ]; then
+  echo "[error] Frontend build failed — .next directory not found" >&2
+  exit 1
+fi
+
+# ── Start with PM2 ────────────────────────────────────────────────────────
+echo "[panel] Starting services with PM2..."
 
 pm2 delete panel-backend  2>/dev/null || true
 pm2 delete panel-frontend 2>/dev/null || true
 
-pm2 start "${PANEL_DIR}/backend/dist/index.js"  --name panel-backend  --env production
-pm2 start "${PANEL_DIR}/frontend/node_modules/.bin/next" \
+# Backend — pass the .env file explicitly
+pm2 start "${PANEL_DIR}/backend/dist/index.js" \
+  --name panel-backend \
+  --cwd "${PANEL_DIR}/backend" \
+  --env production \
+  --log /var/log/panel/backend.log \
+  --merge-logs
+
+# Frontend — use npm start so Next.js finds its .next dir correctly
+pm2 start npm \
   --name panel-frontend \
-  -- start -p 3000
+  --cwd "${PANEL_DIR}/frontend" \
+  --log /var/log/panel/frontend.log \
+  --merge-logs \
+  -- start
 
 pm2 save
 
-# ── NGINX config for panel (IP-based, no domain needed) ───────────────────
-echo "[panel] Writing NGINX config for panel..."
+# Wait for services to come up before writing NGINX config
+echo "[panel] Waiting for services to start..."
+sleep 5
 
-# Detect server public IP
-SERVER_IP="$(curl -fsSL https://api.ipify.org || hostname -I | awk '{print $1}')"
+# Quick health check
+if curl -sf http://127.0.0.1:4000/health >/dev/null; then
+  echo "  ✓ Backend healthy"
+else
+  echo "  ✗ Backend not responding — check: pm2 logs panel-backend"
+fi
+
+if curl -sf http://127.0.0.1:3000 >/dev/null; then
+  echo "  ✓ Frontend healthy"
+else
+  echo "  ✗ Frontend not responding — check: pm2 logs panel-frontend"
+fi
+
+# ── NGINX config (IP-based, no domain required) ────────────────────────────
+echo "[panel] Writing NGINX config..."
+
+SERVER_IP="$(curl -fsSL --connect-timeout 5 https://api.ipify.org 2>/dev/null || hostname -I | awk '{print $1}')"
 
 cat > /etc/nginx/sites-available/panel <<NGINXCONF
-# Panel control panel — accessible via server IP on port 80
-# Managed by setup_panel.sh
+# Panel control panel — accessible via server IP
+# Generated by setup_panel.sh — do not edit manually
 
 server {
     listen 80 default_server;
@@ -121,7 +169,6 @@ server {
 
     client_max_body_size 100M;
 
-    # Forward all traffic to the Next.js frontend (port 3000)
     location / {
         proxy_pass         http://127.0.0.1:3000;
         proxy_http_version 1.1;
@@ -132,37 +179,39 @@ server {
         proxy_set_header   X-Forwarded-For \$proxy_add_x_forwarded_for;
         proxy_set_header   X-Forwarded-Proto \$scheme;
         proxy_cache_bypass \$http_upgrade;
+        proxy_read_timeout 60s;
     }
 }
 NGINXCONF
 
 ln -sf /etc/nginx/sites-available/panel /etc/nginx/sites-enabled/panel
-
-# Remove default NGINX site if still present
 rm -f /etc/nginx/sites-enabled/default
 
-nginx -t && nginx -s reload
+nginx -t && systemctl reload nginx
 
-# ── UFW firewall ───────────────────────────────────────────────────────────
+# ── Firewall ───────────────────────────────────────────────────────────────
 echo "[panel] Configuring firewall..."
-ufw allow OpenSSH   >/dev/null
-ufw allow 'Nginx Full' >/dev/null   # ports 80 + 443
-ufw --force enable  >/dev/null
+ufw allow OpenSSH    >/dev/null
+ufw allow 'Nginx Full' >/dev/null
+ufw --force enable   >/dev/null
 
 echo ""
 echo "========================================"
-echo "  Panel is running!"
+echo "  Panel installed successfully!"
 echo ""
-echo "  Access at: http://${SERVER_IP}"
+echo "  Open in browser: http://${SERVER_IP}"
 echo ""
-echo "  Default credentials:"
+echo "  Login:"
 echo "    Username: admin"
 echo "    Password: changeme"
 echo ""
-echo "  IMPORTANT: Change the password!"
-echo "  Edit /opt/panel/backend/.env"
-echo "  Set ADMIN_PASSWORD_HASH to a bcrypt hash"
-echo "  Then: pm2 restart panel-backend"
+echo "  Change your password after first login:"
+echo "    nano ${PANEL_DIR}/backend/.env"
+echo "    pm2 restart panel-backend"
 echo ""
-echo "  DB password saved to: /opt/panel/backend/.env"
+echo "  Useful commands:"
+echo "    pm2 list                     — process status"
+echo "    pm2 logs panel-backend       — backend logs"
+echo "    pm2 logs panel-frontend      — frontend logs"
+echo "    pm2 restart panel-backend    — restart backend"
 echo "========================================"

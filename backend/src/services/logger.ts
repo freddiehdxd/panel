@@ -1,4 +1,14 @@
 import winston from 'winston';
+import fs from 'fs';
+
+const LOG_DIR = '/var/log/panel';
+
+// Ensure log directory exists before Winston tries to write to it
+try {
+  fs.mkdirSync(LOG_DIR, { recursive: true });
+} catch {
+  // Non-fatal — console logging will still work
+}
 
 export const logger = winston.createLogger({
   level: process.env.NODE_ENV === 'production' ? 'info' : 'debug',
@@ -14,7 +24,12 @@ export const logger = winston.createLogger({
         winston.format.simple()
       ),
     }),
-    new winston.transports.File({ filename: '/var/log/panel/error.log', level: 'error' }),
-    new winston.transports.File({ filename: '/var/log/panel/combined.log' }),
+    new winston.transports.File({
+      filename: `${LOG_DIR}/error.log`,
+      level: 'error',
+    }),
+    new winston.transports.File({
+      filename: `${LOG_DIR}/combined.log`,
+    }),
   ],
 });
