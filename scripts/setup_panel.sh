@@ -81,11 +81,14 @@ EOF
 # ── Install panel dependencies and build ──────────────────────────────────
 echo "[panel] Installing backend dependencies..."
 cd "${PANEL_DIR}/backend"
-npm install --quiet
+npm install
+
+echo "[panel] Building backend (TypeScript → dist/)..."
+npm run build
 
 echo "[panel] Installing frontend dependencies and building..."
 cd "${PANEL_DIR}/frontend"
-npm install --quiet
+npm install
 npm run build
 
 # ── Start panel with PM2 ──────────────────────────────────────────────────
