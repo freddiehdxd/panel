@@ -5,8 +5,16 @@ function getToken(): string | null {
   return localStorage.getItem('panel_token');
 }
 
-export function setToken(t: string): void { localStorage.setItem('panel_token', t); }
-export function clearToken(): void        { localStorage.removeItem('panel_token'); }
+export function setToken(t: string): void {
+  localStorage.setItem('panel_token', t);
+  // Also set as cookie so Next.js middleware can read it server-side
+  document.cookie = `panel_token=${t}; path=/; max-age=${12 * 60 * 60}; SameSite=Lax`;
+}
+
+export function clearToken(): void {
+  localStorage.removeItem('panel_token');
+  document.cookie = 'panel_token=; path=/; max-age=0';
+}
 
 async function req<T>(
   method: string,
