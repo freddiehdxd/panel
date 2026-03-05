@@ -179,6 +179,99 @@ type StatsHistory struct {
 	NetTx      []int64   `json:"netTx"`
 }
 
+// ---- PostgreSQL Monitoring ----
+
+// PgOverview is the top-level response for GET /api/databases/stats
+type PgOverview struct {
+	Version     string       `json:"version"`
+	Uptime      string       `json:"uptime"`
+	MaxConns    int          `json:"maxConns"`
+	ActiveConns int          `json:"activeConns"`
+	IdleConns   int          `json:"idleConns"`
+	TotalConns  int          `json:"totalConns"`
+	CacheHit    float64      `json:"cacheHit"` // percentage
+	TxCommit    int64        `json:"txCommit"`
+	TxRollback  int64        `json:"txRollback"`
+	TupFetched  int64        `json:"tupFetched"`
+	TupInserted int64        `json:"tupInserted"`
+	TupUpdated  int64        `json:"tupUpdated"`
+	TupDeleted  int64        `json:"tupDeleted"`
+	Conflicts   int64        `json:"conflicts"`
+	Deadlocks   int64        `json:"deadlocks"`
+	TempBytes   int64        `json:"tempBytes"`
+	DbStats     []PgDbStats  `json:"databases"`
+	SlowQueries []PgSlowQuery `json:"slowQueries"`
+	Connections []PgConnInfo `json:"connections"`
+}
+
+// PgDbStats is per-database stats from pg_stat_database
+type PgDbStats struct {
+	Name        string  `json:"name"`
+	Size        int64   `json:"size"` // bytes
+	NumBackends int     `json:"numBackends"`
+	TxCommit    int64   `json:"txCommit"`
+	TxRollback  int64   `json:"txRollback"`
+	CacheHit    float64 `json:"cacheHit"`
+	TupFetched  int64   `json:"tupFetched"`
+	TupInserted int64   `json:"tupInserted"`
+	TupUpdated  int64   `json:"tupUpdated"`
+	TupDeleted  int64   `json:"tupDeleted"`
+}
+
+// PgSlowQuery represents a currently active query from pg_stat_activity
+type PgSlowQuery struct {
+	PID       int     `json:"pid"`
+	Database  string  `json:"database"`
+	User      string  `json:"user"`
+	Duration  float64 `json:"duration"` // seconds
+	State     string  `json:"state"`
+	Query     string  `json:"query"`
+	WaitEvent string  `json:"waitEvent"`
+}
+
+// PgConnInfo shows connection breakdown per state
+type PgConnInfo struct {
+	State string `json:"state"`
+	Count int    `json:"count"`
+}
+
+// ---- Redis Monitoring ----
+
+// RedisStats is the response for GET /api/redis/stats
+type RedisStats struct {
+	Version        string  `json:"version"`
+	Uptime         int64   `json:"uptime"` // seconds
+	UptimeHuman    string  `json:"uptimeHuman"`
+	ConnectedClients int   `json:"connectedClients"`
+	BlockedClients int     `json:"blockedClients"`
+	UsedMemory     int64   `json:"usedMemory"`
+	UsedMemoryHuman string `json:"usedMemoryHuman"`
+	UsedMemoryPeak int64   `json:"usedMemoryPeak"`
+	UsedMemoryPeakHuman string `json:"usedMemoryPeakHuman"`
+	MemFragRatio   float64 `json:"memFragRatio"`
+	TotalConnsRecv int64   `json:"totalConnsRecv"`
+	TotalCmdsProc  int64   `json:"totalCmdsProc"`
+	OpsPerSec      int64   `json:"opsPerSec"`
+	KeyspaceHits   int64   `json:"keyspaceHits"`
+	KeyspaceMisses int64   `json:"keyspaceMisses"`
+	HitRate        float64 `json:"hitRate"` // percentage
+	TotalKeys      int64   `json:"totalKeys"`
+	ExpiringKeys   int64   `json:"expiringKeys"`
+	EvictedKeys    int64   `json:"evictedKeys"`
+	RdbLastSave    int64   `json:"rdbLastSave"` // unix timestamp
+	RdbChanges     int64   `json:"rdbChanges"`
+	Role           string  `json:"role"` // master/slave
+	Keyspaces      []RedisKeyspace `json:"keyspaces"`
+}
+
+// RedisKeyspace represents a single Redis DB keyspace
+type RedisKeyspace struct {
+	DB      string `json:"db"`
+	Keys    int64  `json:"keys"`
+	Expires int64  `json:"expires"`
+	AvgTTL  int64  `json:"avgTtl"`
+}
+
 // ExecResult holds the result of a command execution
 type ExecResult struct {
 	Stdout string

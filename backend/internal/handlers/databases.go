@@ -5,12 +5,14 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"math"
 	"net/http"
 	"time"
 
 	"github.com/go-chi/chi/v5"
 
 	"panel-backend/internal/config"
+	"panel-backend/internal/models"
 	"panel-backend/internal/services"
 )
 
@@ -187,4 +189,140 @@ func (h *DatabasesHandler) Delete(w http.ResponseWriter, r *http.Request) {
 	h.db.Exec(ctx, "DELETE FROM managed_databases WHERE name = $1", name)
 
 	Success(w, map[string]string{"message": "Database " + name + " deleted"})
+}
+
+// Stats handles GET /api/databases/stats — PostgreSQL monitoring dashboard
+func (h *DatabasesHandler) Stats(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+
+	overview := models.PgOverview{}
+
+	// PostgreSQL version
+	_ = h.db.QueryRow(ctx, "SELECT version()").Scan(&overview.Version)
+
+	// Uptime
+	var uptimeSecs float64
+	_ = h.db.QueryRow(ctx, "SELECT EXTRACT(epoch FROM (now() - pg_postmaster_start_time()))").Scan(&uptimeSecs)
+	overview.Uptime = formatPgUptime(int(uptimeSecs))
+
+	// max_connections setting
+	var maxConnsStr string
+	_ = h.db.QueryRow(ctx, "SHOW max_connections").Scan(&maxConnsStr)
+	fmt.Sscanf(maxConnsStr, "%d", &overview.MaxConns)
+
+	// Connection breakdown by state
+	rows, err := h.db.Query(ctx, `
+		SELECT COALESCE(state, 'unknown'), COUNT(*)
+		FROM pg_stat_activity
+		WHERE backend_type = 'client backend'
+		GROUP BY state ORDER BY COUNT(*) DESC`)
+	if err == nil {
+		defer rows.Close()
+		for rows.Next() {
+			var ci models.PgConnInfo
+			if rows.Scan(&ci.State, &ci.Count) == nil {
+				overview.Connections = append(overview.Connections, ci)
+				overview.TotalConns += ci.Count
+				if ci.State == "active" {
+					overview.ActiveConns = ci.Count
+				} else if ci.State == "idle" {
+					overview.IdleConns = ci.Count
+				}
+			}
+		}
+	}
+
+	// Global cache hit ratio across all databases
+	_ = h.db.QueryRow(ctx, `
+		SELECT COALESCE(
+			ROUND(SUM(blks_hit)::numeric / NULLIF(SUM(blks_hit) + SUM(blks_read), 0) * 100, 2),
+		0) FROM pg_stat_database`).Scan(&overview.CacheHit)
+
+	// Aggregate transaction + tuple stats
+	_ = h.db.QueryRow(ctx, `
+		SELECT COALESCE(SUM(xact_commit),0), COALESCE(SUM(xact_rollback),0),
+		       COALESCE(SUM(tup_fetched),0), COALESCE(SUM(tup_inserted),0),
+		       COALESCE(SUM(tup_updated),0), COALESCE(SUM(tup_deleted),0),
+		       COALESCE(SUM(conflicts),0), COALESCE(SUM(deadlocks),0),
+		       COALESCE(SUM(temp_bytes),0)
+		FROM pg_stat_database`).Scan(
+		&overview.TxCommit, &overview.TxRollback,
+		&overview.TupFetched, &overview.TupInserted,
+		&overview.TupUpdated, &overview.TupDeleted,
+		&overview.Conflicts, &overview.Deadlocks,
+		&overview.TempBytes)
+
+	// Per-database stats (only managed + panel db, skip template/postgres)
+	dbRows, err := h.db.Query(ctx, `
+		SELECT d.datname,
+		       pg_database_size(d.datname),
+		       s.numbackends,
+		       s.xact_commit, s.xact_rollback,
+		       COALESCE(ROUND(s.blks_hit::numeric / NULLIF(s.blks_hit + s.blks_read, 0) * 100, 2), 0),
+		       s.tup_fetched, s.tup_inserted, s.tup_updated, s.tup_deleted
+		FROM pg_database d
+		JOIN pg_stat_database s ON s.datname = d.datname
+		WHERE d.datistemplate = false AND d.datname != 'postgres'
+		ORDER BY pg_database_size(d.datname) DESC`)
+	if err == nil {
+		defer dbRows.Close()
+		for dbRows.Next() {
+			var ds models.PgDbStats
+			if dbRows.Scan(&ds.Name, &ds.Size, &ds.NumBackends,
+				&ds.TxCommit, &ds.TxRollback, &ds.CacheHit,
+				&ds.TupFetched, &ds.TupInserted, &ds.TupUpdated, &ds.TupDeleted) == nil {
+				overview.DbStats = append(overview.DbStats, ds)
+			}
+		}
+	}
+
+	// Active/slow queries (running > 100ms, limited to 20)
+	qRows, err := h.db.Query(ctx, `
+		SELECT pid, COALESCE(datname,''), COALESCE(usename,''),
+		       EXTRACT(epoch FROM (now() - query_start)),
+		       COALESCE(state,''), LEFT(query, 200),
+		       COALESCE(wait_event_type || ':' || wait_event, '')
+		FROM pg_stat_activity
+		WHERE state = 'active' AND pid != pg_backend_pid()
+		  AND query NOT LIKE '%pg_stat%'
+		  AND query_start < now() - interval '100 milliseconds'
+		ORDER BY query_start ASC LIMIT 20`)
+	if err == nil {
+		defer qRows.Close()
+		for qRows.Next() {
+			var sq models.PgSlowQuery
+			if qRows.Scan(&sq.PID, &sq.Database, &sq.User, &sq.Duration,
+				&sq.State, &sq.Query, &sq.WaitEvent) == nil {
+				sq.Duration = math.Round(sq.Duration*1000) / 1000
+				overview.SlowQueries = append(overview.SlowQueries, sq)
+			}
+		}
+	}
+
+	// Ensure non-nil slices for JSON
+	if overview.DbStats == nil {
+		overview.DbStats = []models.PgDbStats{}
+	}
+	if overview.SlowQueries == nil {
+		overview.SlowQueries = []models.PgSlowQuery{}
+	}
+	if overview.Connections == nil {
+		overview.Connections = []models.PgConnInfo{}
+	}
+
+	Success(w, overview)
+}
+
+func formatPgUptime(totalSecs int) string {
+	days := totalSecs / 86400
+	hours := (totalSecs % 86400) / 3600
+	mins := (totalSecs % 3600) / 60
+	if days > 0 {
+		return fmt.Sprintf("%dd %dh %dm", days, hours, mins)
+	}
+	if hours > 0 {
+		return fmt.Sprintf("%dh %dm", hours, mins)
+	}
+	return fmt.Sprintf("%dm", mins)
 }

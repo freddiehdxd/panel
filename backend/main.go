@@ -119,10 +119,12 @@ func main() {
 		r.Get("/databases", dbHandler.List)
 		r.Post("/databases", dbHandler.Create)
 		r.Delete("/databases/{name}", dbHandler.Delete)
+		r.Get("/databases/stats", dbHandler.Stats)
 
 		// Redis
 		r.Get("/redis", redisHandler.Status)
 		r.Post("/redis/install", redisHandler.Install)
+		r.Get("/redis/stats", redisHandler.Stats)
 
 		// Files
 		r.Get("/files/{app}", filesHandler.List)
