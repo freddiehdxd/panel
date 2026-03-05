@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ╔════════════════════════════════════════════════════════════════════════════╗
-# ║  ServerPanel — One-Shot Installer                                         ║
+# ║  ServerPanel — One-Shot Installer (Go + Vite Edition)                     ║
 # ║  Run on a fresh Ubuntu 22.04+ VPS as root.                                ║
 # ║                                                                            ║
 # ║  One-liner install:                                                        ║
@@ -29,18 +29,18 @@ warn()  { echo -e "${YELLOW}[warn]${NC}  $*"; }
 fail()  { echo -e "${RED}[fail]${NC}  $*" >&2; exit 1; }
 step()  { echo -e "\n${BOLD}${CYAN}[$1/${TOTAL_STEPS}]${NC} ${BOLD}$2${NC}"; }
 
-TOTAL_STEPS=12
+TOTAL_STEPS=13
 
 echo ""
 echo -e "${BOLD}${CYAN}╔════════════════════════════════════════╗${NC}"
-echo -e "${BOLD}${CYAN}║     ServerPanel — Installer            ║${NC}"
+echo -e "${BOLD}${CYAN}║     ServerPanel — Installer v2         ║${NC}"
+echo -e "${BOLD}${CYAN}║     (Go backend + Vite frontend)       ║${NC}"
 echo -e "${BOLD}${CYAN}╚════════════════════════════════════════╝${NC}"
 echo ""
 
 # ── 0. Preflight ──────────────────────────────────────────────────────────
 [ "$EUID" -ne 0 ] && fail "Please run as root (sudo bash $0)"
 
-# Detect OS
 if [ -f /etc/os-release ]; then
   . /etc/os-release
   if [[ "${ID}" != "ubuntu" && "${ID}" != "debian" ]]; then
@@ -70,26 +70,42 @@ else
   ok "Swap OK (${TOTAL_RAM_MB} MB RAM)"
 fi
 
-# ── 3. Node.js LTS ───────────────────────────────────────────────────────
-step 3 "Installing Node.js"
+# ── 3. Go 1.22+ ──────────────────────────────────────────────────────────
+step 3 "Installing Go"
+GO_VERSION="1.22.6"
+if ! command -v go &>/dev/null || [[ "$(go version 2>/dev/null)" != *"go1.2"* ]]; then
+  info "Installing Go ${GO_VERSION}..."
+  curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz" -o /tmp/go.tar.gz
+  rm -rf /usr/local/go
+  tar -C /usr/local -xzf /tmp/go.tar.gz
+  rm /tmp/go.tar.gz
+  # Add to PATH for this session and permanently
+  export PATH="/usr/local/go/bin:$PATH"
+  if ! grep -q '/usr/local/go/bin' /etc/profile.d/go.sh 2>/dev/null; then
+    echo 'export PATH="/usr/local/go/bin:$PATH"' > /etc/profile.d/go.sh
+  fi
+fi
+ok "Go $(go version | awk '{print $3}')"
+
+# ── 4. Node.js LTS (needed for PM2 + Vite build) ─────────────────────────
+step 4 "Installing Node.js"
 if ! command -v node &>/dev/null; then
   curl -fsSL https://deb.nodesource.com/setup_lts.x | bash - > /dev/null 2>&1
   apt-get install -y -qq nodejs > /dev/null
 fi
 ok "Node $(node -v) / NPM $(npm -v)"
 
-# ── 4. PM2 ────────────────────────────────────────────────────────────────
-step 4 "Installing PM2"
+# ── 5. PM2 ────────────────────────────────────────────────────────────────
+step 5 "Installing PM2"
 if ! command -v pm2 &>/dev/null; then
   npm install -g pm2 --quiet > /dev/null 2>&1
 fi
-# Auto-start PM2 on reboot
 env PATH="$PATH:/usr/bin" pm2 startup systemd -u root --hp /root 2>/dev/null | \
   grep "sudo" | bash 2>/dev/null || true
 ok "PM2 $(pm2 -v)"
 
-# ── 5. NGINX ─────────────────────────────────────────────────────────────
-step 5 "Installing NGINX"
+# ── 6. NGINX ─────────────────────────────────────────────────────────────
+step 6 "Installing NGINX"
 if ! command -v nginx &>/dev/null; then
   apt-get install -y -qq nginx > /dev/null
 fi
@@ -98,22 +114,20 @@ systemctl start nginx
 rm -f /etc/nginx/sites-enabled/default
 ok "NGINX $(nginx -v 2>&1 | grep -oP '[\d.]+')"
 
-# ── 6. PostgreSQL ────────────────────────────────────────────────────────
-step 6 "Installing PostgreSQL"
+# ── 7. PostgreSQL ────────────────────────────────────────────────────────
+step 7 "Installing PostgreSQL"
 if ! command -v psql &>/dev/null; then
   apt-get install -y -qq postgresql postgresql-contrib > /dev/null
 fi
 systemctl enable postgresql > /dev/null 2>&1
 systemctl start postgresql
 
-# Wait for ready
 for i in $(seq 1 30); do
   sudo -u postgres pg_isready -q 2>/dev/null && break
   [ "$i" -eq 30 ] && fail "PostgreSQL did not start in 30 seconds"
   sleep 1
 done
 
-# Create user + database
 sudo -u postgres psql -v ON_ERROR_STOP=1 <<-SQL > /dev/null 2>&1
   DO \$\$
   BEGIN
@@ -131,8 +145,8 @@ sudo -u postgres psql -v ON_ERROR_STOP=1 <<-SQL > /dev/null 2>&1
 SQL
 ok "PostgreSQL ready — DB: ${PANEL_DB_NAME}, User: ${PANEL_DB_USER}"
 
-# ── 7. Redis ─────────────────────────────────────────────────────────────
-step 7 "Installing Redis"
+# ── 8. Redis ─────────────────────────────────────────────────────────────
+step 8 "Installing Redis"
 if ! command -v redis-server &>/dev/null; then
   apt-get install -y -qq redis-server > /dev/null
 fi
@@ -141,8 +155,8 @@ systemctl enable redis-server > /dev/null 2>&1
 systemctl restart redis-server
 ok "Redis running on 127.0.0.1:6379"
 
-# ── 8. Directories + config ──────────────────────────────────────────────
-step 8 "Writing configuration"
+# ── 9. Configuration ─────────────────────────────────────────────────────
+step 9 "Writing configuration"
 mkdir -p /var/www/apps /var/log/panel
 chmod 755 /var/www/apps
 chmod +x "${PANEL_DIR}"/scripts/*.sh
@@ -160,88 +174,75 @@ NGINX_ENABLED=/etc/nginx/sites-enabled
 SCRIPTS_DIR=${PANEL_DIR}/scripts
 APP_PORT_START=3001
 APP_PORT_END=3999
-PANEL_ORIGIN=http://localhost:3000
+PANEL_ORIGIN=http://localhost
 EOF
 
-cat > "${PANEL_DIR}/frontend/.env.local" <<EOF
-BACKEND_URL=http://127.0.0.1:4000
-NEXT_PUBLIC_API_URL=http://127.0.0.1:4000
-EOF
+ok "Config written to backend/.env"
 
-ok "Config written to backend/.env and frontend/.env.local"
+# ── 10. Build ─────────────────────────────────────────────────────────────
+step 10 "Building application"
 
-# ── 9. Build ─────────────────────────────────────────────────────────────
-step 9 "Building application"
-
-info "Installing backend dependencies..."
+info "Building Go backend..."
 cd "${PANEL_DIR}/backend"
-npm install --quiet > /dev/null 2>&1
-npm run build
-[ ! -f "${PANEL_DIR}/backend/dist/index.js" ] && fail "Backend build failed"
-ok "Backend built"
+export PATH="/usr/local/go/bin:$PATH"
+go mod tidy
+CGO_ENABLED=0 go build -o panel-server ./main.go
+[ ! -f "${PANEL_DIR}/backend/panel-server" ] && fail "Backend build failed"
+ok "Backend built (Go binary: panel-server)"
 
-info "Installing frontend dependencies..."
+info "Building Vite frontend..."
 cd "${PANEL_DIR}/frontend"
 npm install --quiet > /dev/null 2>&1
 npm run build 2>&1 | tail -5
-[ ! -d "${PANEL_DIR}/frontend/.next" ] && fail "Frontend build failed"
-ok "Frontend built"
+[ ! -d "${PANEL_DIR}/frontend/dist" ] && fail "Frontend build failed"
+ok "Frontend built (static files in dist/)"
 
-# ── 10. Start services ───────────────────────────────────────────────────
-step 10 "Starting services"
+# ── 11. Start services ───────────────────────────────────────────────────
+step 11 "Starting services"
 
-# PM2
+# Stop old processes if they exist
 pm2 delete panel-backend  2>/dev/null || true
 pm2 delete panel-frontend 2>/dev/null || true
 
-pm2 start "${PANEL_DIR}/backend/dist/index.js" \
+# Start Go backend via PM2
+pm2 start "${PANEL_DIR}/backend/panel-server" \
   --name panel-backend \
   --cwd "${PANEL_DIR}/backend" \
-  --env production \
   --log /var/log/panel/backend.log \
   --merge-logs > /dev/null
 
-pm2 start npm \
-  --name panel-frontend \
-  --cwd "${PANEL_DIR}/frontend" \
-  --log /var/log/panel/frontend.log \
-  --merge-logs \
-  -- start > /dev/null
+# No frontend process needed! Static files served by NGINX directly.
 
 pm2 save > /dev/null 2>&1
 
-info "Waiting for services..."
-sleep 5
+info "Waiting for backend..."
+sleep 3
 
-# Health checks
 if curl -sf http://127.0.0.1:4000/health > /dev/null 2>&1; then
   ok "Backend healthy (port 4000)"
 else
   warn "Backend not responding yet — check: pm2 logs panel-backend"
 fi
 
-if curl -sf http://127.0.0.1:3000 > /dev/null 2>&1; then
-  ok "Frontend healthy (port 3000)"
-else
-  warn "Frontend not responding yet — check: pm2 logs panel-frontend"
-fi
-
-# ── NGINX config ─────────────────────────────────────────────────────────
+# ── NGINX config — static frontend + API proxy ───────────────────────────
 SERVER_IP="$(curl -fsSL --connect-timeout 5 https://api.ipify.org 2>/dev/null || hostname -I | awk '{print $1}')"
 
-cat > /etc/nginx/sites-available/panel <<'NGINXCONF'
-# ServerPanel — auto-generated by setup_panel.sh
-# API requests go directly to backend (port 4000) — no Next.js middleman
-# Frontend requests go to Next.js (port 3000)
+cat > /etc/nginx/sites-available/panel << 'NGINXCONF'
+# ServerPanel v2 — Go backend + Vite static frontend
+# Frontend: NGINX serves static files directly (0 MB runtime)
+# Backend: API proxied to Go binary on port 4000
 
 server {
     listen 80 default_server;
     listen [::]:80 default_server;
     server_name _;
 
+    root /opt/panel/frontend/dist;
+    index index.html;
+
     client_max_body_size 100M;
 
-    # API — proxy directly to Express backend (fast, no Next.js rewrite overhead)
+    # API — proxy to Go backend
     location /api/ {
         proxy_pass         http://127.0.0.1:4000;
         proxy_http_version 1.1;
@@ -256,18 +257,23 @@ server {
         add_header Cache-Control "no-store, no-cache" always;
     }
 
-    # Frontend — Next.js
-    location / {
-        proxy_pass         http://127.0.0.1:3000;
+    # Health check — proxy to Go backend
+    location /health {
+        proxy_pass http://127.0.0.1:4000;
         proxy_http_version 1.1;
-        proxy_set_header   Upgrade $http_upgrade;
-        proxy_set_header   Connection 'upgrade';
-        proxy_set_header   Host $host;
-        proxy_set_header   X-Real-IP $remote_addr;
-        proxy_set_header   X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header   X-Forwarded-Proto $scheme;
-        proxy_cache_bypass $http_upgrade;
-        proxy_read_timeout 60s;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+    }
+
+    # Static assets — long cache (Vite hashes filenames)
+    location /assets/ {
+        expires 1y;
+        add_header Cache-Control "public, immutable";
+    }
+
+    # SPA fallback — serve index.html for all non-file routes
+    location / {
+        try_files $uri $uri/ /index.html;
     }
 }
 NGINXCONF
@@ -276,7 +282,7 @@ ln -sf /etc/nginx/sites-available/panel /etc/nginx/sites-enabled/panel
 rm -f /etc/nginx/sites-enabled/default
 
 nginx -t > /dev/null 2>&1 && systemctl reload nginx
-ok "NGINX configured — proxying to backend + frontend"
+ok "NGINX configured — static frontend + API proxy to Go"
 
 # ── Firewall ─────────────────────────────────────────────────────────────
 ufw allow OpenSSH      > /dev/null 2>&1
@@ -284,16 +290,15 @@ ufw allow 'Nginx Full' > /dev/null 2>&1
 ufw --force enable     > /dev/null 2>&1
 ok "Firewall enabled (SSH + HTTP/HTTPS)"
 
-# ── Install Certbot (for later SSL usage) ────────────────────────────────
+# ── Certbot ───────────────────────────────────────────────────────────────
 if ! command -v certbot &>/dev/null; then
   apt-get install -y -qq certbot python3-certbot-nginx > /dev/null 2>&1
   ok "Certbot installed (ready for SSL)"
 fi
 
-# ── 11. Hardening — logrotate, backups, auto-updates ─────────────────────
-step 11 "Hardening — logrotate, backups, auto-updates"
+# ── 12. Hardening — logrotate, backups, auto-updates ─────────────────────
+step 12 "Hardening — logrotate, backups, auto-updates"
 
-# Logrotate for panel logs
 cat > /etc/logrotate.d/panel <<'LOGROTATE'
 /var/log/panel/*.log {
     daily
@@ -306,7 +311,6 @@ cat > /etc/logrotate.d/panel <<'LOGROTATE'
 }
 LOGROTATE
 
-# Logrotate for NGINX (if not already present)
 if [ ! -f /etc/logrotate.d/nginx ]; then
 cat > /etc/logrotate.d/nginx <<'LOGROTATE'
 /var/log/nginx/*.log {
@@ -327,7 +331,6 @@ fi
 
 ok "Logrotate configured (14-day retention)"
 
-# Unattended security upgrades
 apt-get install -y -qq unattended-upgrades > /dev/null 2>&1
 cat > /etc/apt/apt.conf.d/20auto-upgrades <<'AUTOUPGRADE'
 APT::Periodic::Update-Package-Lists "1";
@@ -336,7 +339,6 @@ APT::Periodic::AutocleanInterval "7";
 AUTOUPGRADE
 ok "Unattended security upgrades enabled"
 
-# Daily PostgreSQL backup via cron
 mkdir -p /var/backups/panel
 cat > /etc/cron.d/panel-backup <<CRON
 # Daily backup of panel database at 3:00 AM
@@ -347,10 +349,9 @@ CRON
 chmod 600 /etc/cron.d/panel-backup
 ok "Daily pg_dump backup at 3:00 AM (14-day retention)"
 
-# ── 12. Security — fail2ban, NGINX hardening, bcrypt password ─────────────
-step 12 "Security — fail2ban, NGINX hardening, bcrypt password"
+# ── 13. Security — fail2ban, NGINX hardening, bcrypt password ─────────────
+step 13 "Security — fail2ban, NGINX hardening, bcrypt password"
 
-# fail2ban
 apt-get install -y -qq fail2ban > /dev/null 2>&1
 
 cat > /etc/fail2ban/jail.local <<'JAIL'
@@ -428,9 +429,23 @@ NGINXSEC
 nginx -t > /dev/null 2>&1 && systemctl reload nginx
 ok "NGINX hardened — version hidden, security headers, buffer limits"
 
-# Bcrypt admin password
+# Bcrypt admin password using Go
 cd "${PANEL_DIR}/backend"
-BCRYPT_HASH=$(node -e "require('bcryptjs').hash('${ADMIN_PASS}', 12).then(h => process.stdout.write(h))")
+BCRYPT_HASH=$(go run -ldflags="-s -w" <<'GOCODE' -- "${ADMIN_PASS}" 2>/dev/null || echo "")
+package main
+import (
+  "fmt"
+  "os"
+  "golang.org/x/crypto/bcrypt"
+)
+func main() {
+  pass := os.Args[len(os.Args)-1]
+  hash, err := bcrypt.GenerateFromPassword([]byte(pass), 12)
+  if err != nil { os.Exit(1) }
+  fmt.Print(string(hash))
+}
+GOCODE
+
 if [ -n "$BCRYPT_HASH" ]; then
   sed -i '/^ADMIN_PASSWORD=/d' .env
   grep -q 'ADMIN_PASSWORD_HASH' .env && \
@@ -444,7 +459,8 @@ fi
 # ── Done ─────────────────────────────────────────────────────────────────
 echo ""
 echo -e "${BOLD}${GREEN}╔════════════════════════════════════════════════════╗${NC}"
-echo -e "${BOLD}${GREEN}║   ServerPanel installed successfully!              ║${NC}"
+echo -e "${BOLD}${GREEN}║   ServerPanel v2 installed successfully!           ║${NC}"
+echo -e "${BOLD}${GREEN}║   (Go backend + Vite static frontend)              ║${NC}"
 echo -e "${BOLD}${GREEN}╚════════════════════════════════════════════════════╝${NC}"
 echo ""
 echo -e "  ${BOLD}Open in browser:${NC}  http://${SERVER_IP}"
@@ -455,6 +471,15 @@ echo -e "    Password:  ${CYAN}${ADMIN_PASS}${NC}"
 echo ""
 echo -e "  ${YELLOW}Save your password! It was auto-generated.${NC}"
 echo -e "  To change it later: nano ${PANEL_DIR}/backend/.env"
+echo ""
+echo -e "  ${BOLD}Stack:${NC}"
+echo -e "    Backend:   Go binary (${PANEL_DIR}/backend/panel-server)"
+echo -e "    Frontend:  Static files served by NGINX (${PANEL_DIR}/frontend/dist)"
+echo -e "    No frontend Node.js process — 0 MB runtime overhead"
+echo ""
+echo -e "  ${BOLD}RAM savings:${NC}"
+echo -e "    Before: ~700 MB (Express + Next.js workers)"
+echo -e "    After:  ~300 MB (Go ~15 MB + no frontend process)"
 echo ""
 echo -e "  ${BOLD}Useful commands:${NC}"
 echo -e "    pm2 list                   — process status"

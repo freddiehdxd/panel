@@ -1,10 +1,19 @@
 # Dependencies
 node_modules/
 
-# Build output
-backend/dist/
+# Build output — Go
+backend/panel-server
+
+# Build output — Vite
+frontend/dist/
+
+# Build output — legacy Next.js
 frontend/.next/
 frontend/out/
+backend/dist/
+
+# Go sum (resolved on build)
+backend/go.sum
 
 # Environment files — NEVER commit these
 .env
@@ -29,3 +38,7 @@ Thumbs.db
 
 # Claude
 .claude/
+
+# Old code (pre-rewrite)
+backend-old/
+frontend-old/

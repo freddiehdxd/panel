@@ -1,0 +1,328 @@
+package handlers
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"os"
+	"time"
+
+	"github.com/go-chi/chi/v5"
+
+	"panel-backend/internal/config"
+	"panel-backend/internal/models"
+	"panel-backend/internal/services"
+)
+
+// AppsHandler handles application routes
+type AppsHandler struct {
+	db   *services.DB
+	pm2  *services.PM2
+	exec *services.Executor
+	port *services.PortAllocator
+	cfg  *config.Config
+}
+
+// NewAppsHandler creates a new apps handler
+func NewAppsHandler(db *services.DB, pm2 *services.PM2, exec *services.Executor, port *services.PortAllocator, cfg *config.Config) *AppsHandler {
+	return &AppsHandler{db: db, pm2: pm2, exec: exec, port: port, cfg: cfg}
+}
+
+// List handles GET /api/apps
+func (h *AppsHandler) List(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+
+	rows, err := h.db.Query(ctx,
+		"SELECT id, name, repo_url, branch, port, domain, ssl_enabled, env_vars, created_at, updated_at FROM apps ORDER BY created_at DESC")
+	if err != nil {
+		Error(w, http.StatusInternalServerError, "Failed to fetch apps")
+		return
+	}
+	defer rows.Close()
+
+	apps := make([]models.App, 0)
+	for rows.Next() {
+		var app models.App
+		var envJSON []byte
+		if err := rows.Scan(&app.ID, &app.Name, &app.RepoURL, &app.Branch, &app.Port,
+			&app.Domain, &app.SSLEnabled, &envJSON, &app.CreatedAt, &app.UpdatedAt); err != nil {
+			Error(w, http.StatusInternalServerError, "Failed to scan app")
+			return
+		}
+		if err := json.Unmarshal(envJSON, &app.EnvVars); err != nil {
+			app.EnvVars = make(map[string]string)
+		}
+		apps = append(apps, app)
+	}
+
+	// Enrich with PM2 status
+	pm2List, err := h.pm2.List()
+	if err == nil {
+		pm2Map := make(map[string]models.Pm2Process)
+		for _, p := range pm2List {
+			pm2Map[p.Name] = p
+		}
+		for i := range apps {
+			if proc, ok := pm2Map[apps[i].Name]; ok {
+				apps[i].Status = proc.Status
+				apps[i].CPU = proc.CPU
+				apps[i].Memory = proc.Memory
+			} else {
+				apps[i].Status = "stopped"
+			}
+		}
+	}
+
+	Success(w, apps)
+}
+
+// Get handles GET /api/apps/:name
+func (h *AppsHandler) Get(w http.ResponseWriter, r *http.Request) {
+	name := chi.URLParam(r, "name")
+
+	app, err := h.getAppByName(r.Context(), name)
+	if err != nil {
+		Error(w, http.StatusNotFound, "App not found")
+		return
+	}
+
+	// Enrich with PM2 status
+	pm2List, err := h.pm2.List()
+	if err == nil {
+		for _, p := range pm2List {
+			if p.Name == app.Name {
+				app.Status = p.Status
+				app.CPU = p.CPU
+				app.Memory = p.Memory
+				break
+			}
+		}
+	}
+	if app.Status == "" {
+		app.Status = "stopped"
+	}
+
+	Success(w, app)
+}
+
+// Create handles POST /api/apps
+func (h *AppsHandler) Create(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Name    string            `json:"name"`
+		RepoURL string            `json:"repo_url"`
+		Branch  string            `json:"branch"`
+		EnvVars map[string]string `json:"env_vars"`
+	}
+	if err := ReadJSON(r, &body); err != nil {
+		Error(w, http.StatusBadRequest, "Invalid request body")
+		return
+	}
+
+	if body.Name == "" {
+		Error(w, http.StatusBadRequest, "App name is required")
+		return
+	}
+
+	if !services.ValidateAppName(body.Name) {
+		Error(w, http.StatusBadRequest, "Invalid app name. Use lowercase letters, numbers and hyphens only.")
+		return
+	}
+
+	if body.Branch == "" {
+		body.Branch = "main"
+	}
+	if body.EnvVars == nil {
+		body.EnvVars = make(map[string]string)
+	}
+
+	ctx := r.Context()
+
+	// Check for duplicate
+	var exists bool
+	err := h.db.QueryRow(ctx, "SELECT EXISTS(SELECT 1 FROM apps WHERE name = $1)", body.Name).Scan(&exists)
+	if err != nil {
+		Error(w, http.StatusInternalServerError, "Database error")
+		return
+	}
+	if exists {
+		Error(w, http.StatusConflict, "App name already exists")
+		return
+	}
+
+	// Allocate port
+	port, err := h.port.Allocate(ctx)
+	if err != nil {
+		Error(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	// Deploy or create empty directory
+	if body.RepoURL != "" {
+		result, err := h.exec.RunScript("deploy_next_app.sh",
+			body.Name, body.RepoURL, body.Branch, fmt.Sprintf("%d", port))
+		if err != nil {
+			Error(w, http.StatusInternalServerError, "Deploy failed")
+			return
+		}
+		if result.Code != 0 {
+			msg := result.Stderr
+			if msg == "" {
+				msg = "Deploy script failed"
+			}
+			Error(w, http.StatusInternalServerError, msg)
+			return
+		}
+	} else {
+		appDir := h.cfg.AppsDir + "/" + body.Name
+		if err := os.MkdirAll(appDir, 0755); err != nil {
+			Error(w, http.StatusInternalServerError, "Failed to create app directory")
+			return
+		}
+	}
+
+	// Insert into database
+	envJSON, _ := json.Marshal(body.EnvVars)
+	var app models.App
+	var envBytes []byte
+	err = h.db.QueryRow(ctx,
+		`INSERT INTO apps (name, repo_url, branch, port, env_vars) 
+		 VALUES ($1, $2, $3, $4, $5) 
+		 RETURNING id, name, repo_url, branch, port, domain, ssl_enabled, env_vars, created_at, updated_at`,
+		body.Name, body.RepoURL, body.Branch, port, envJSON,
+	).Scan(&app.ID, &app.Name, &app.RepoURL, &app.Branch, &app.Port,
+		&app.Domain, &app.SSLEnabled, &envBytes, &app.CreatedAt, &app.UpdatedAt)
+	if err != nil {
+		Error(w, http.StatusInternalServerError, "Failed to save app")
+		return
+	}
+	json.Unmarshal(envBytes, &app.EnvVars)
+
+	SuccessCreated(w, app)
+}
+
+// Action handles POST /api/apps/:name/action
+func (h *AppsHandler) Action(w http.ResponseWriter, r *http.Request) {
+	name := chi.URLParam(r, "name")
+
+	var body struct {
+		Action string `json:"action"`
+	}
+	if err := ReadJSON(r, &body); err != nil {
+		Error(w, http.StatusBadRequest, "Invalid request body")
+		return
+	}
+
+	ctx := r.Context()
+
+	app, err := h.getAppByName(ctx, name)
+	if err != nil {
+		Error(w, http.StatusNotFound, "App not found")
+		return
+	}
+
+	switch body.Action {
+	case "start", "stop", "restart":
+		result, err := h.pm2.Action(body.Action, app.Name)
+		if err != nil {
+			Error(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		Success(w, map[string]string{"message": result.Stdout})
+
+	case "delete":
+		// Delete from PM2 (best effort)
+		h.pm2.Action("delete", app.Name)
+
+		// Delete from DB
+		_, err := h.db.Exec(ctx, "DELETE FROM apps WHERE name = $1", app.Name)
+		if err != nil {
+			Error(w, http.StatusInternalServerError, "Failed to delete app")
+			return
+		}
+		Success(w, map[string]string{"message": "App deleted"})
+
+	case "rebuild":
+		if app.RepoURL == "" {
+			Error(w, http.StatusBadRequest, "Cannot rebuild -- app has no git repository")
+			return
+		}
+
+		result, err := h.exec.RunScript("deploy_next_app.sh",
+			app.Name, app.RepoURL, app.Branch, fmt.Sprintf("%d", app.Port))
+		if err != nil {
+			Error(w, http.StatusInternalServerError, "Rebuild failed")
+			return
+		}
+		if result.Code != 0 {
+			msg := result.Stderr
+			if msg == "" {
+				msg = "Deploy script failed"
+			}
+			Error(w, http.StatusInternalServerError, msg)
+			return
+		}
+		Success(w, map[string]string{"message": "Rebuild complete"})
+
+	default:
+		Error(w, http.StatusBadRequest, "Invalid action")
+	}
+}
+
+// UpdateEnv handles PUT /api/apps/:name/env
+func (h *AppsHandler) UpdateEnv(w http.ResponseWriter, r *http.Request) {
+	name := chi.URLParam(r, "name")
+
+	var body struct {
+		EnvVars map[string]string `json:"env_vars"`
+	}
+	if err := ReadJSON(r, &body); err != nil || body.EnvVars == nil {
+		Error(w, http.StatusBadRequest, "env_vars object required")
+		return
+	}
+
+	ctx := r.Context()
+
+	// Check app exists
+	_, err := h.getAppByName(ctx, name)
+	if err != nil {
+		Error(w, http.StatusNotFound, "App not found")
+		return
+	}
+
+	envJSON, _ := json.Marshal(body.EnvVars)
+	var app models.App
+	var envBytes []byte
+	err = h.db.QueryRow(ctx,
+		`UPDATE apps SET env_vars = $1, updated_at = NOW() WHERE name = $2 
+		 RETURNING id, name, repo_url, branch, port, domain, ssl_enabled, env_vars, created_at, updated_at`,
+		envJSON, name,
+	).Scan(&app.ID, &app.Name, &app.RepoURL, &app.Branch, &app.Port,
+		&app.Domain, &app.SSLEnabled, &envBytes, &app.CreatedAt, &app.UpdatedAt)
+	if err != nil {
+		Error(w, http.StatusInternalServerError, "Failed to update env vars")
+		return
+	}
+	json.Unmarshal(envBytes, &app.EnvVars)
+
+	Success(w, app)
+}
+
+// getAppByName fetches an app from the database by name
+func (h *AppsHandler) getAppByName(ctx context.Context, name string) (*models.App, error) {
+	var app models.App
+	var envJSON []byte
+	err := h.db.QueryRow(ctx,
+		"SELECT id, name, repo_url, branch, port, domain, ssl_enabled, env_vars, created_at, updated_at FROM apps WHERE name = $1",
+		name,
+	).Scan(&app.ID, &app.Name, &app.RepoURL, &app.Branch, &app.Port,
+		&app.Domain, &app.SSLEnabled, &envJSON, &app.CreatedAt, &app.UpdatedAt)
+	if err != nil {
+		return nil, err
+	}
+	if err := json.Unmarshal(envJSON, &app.EnvVars); err != nil {
+		app.EnvVars = make(map[string]string)
+	}
+	return &app, nil
+}

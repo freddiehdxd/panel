@@ -1,7 +1,5 @@
-'use client';
 import { useState, useEffect, useRef } from 'react';
-import Link from 'next/link';
-import { usePathname, useRouter } from 'next/navigation';
+import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { clearToken } from '@/lib/api';
 import {
   LayoutDashboard, Server, Globe, ShieldCheck, Database,
@@ -21,8 +19,8 @@ const NAV_LINKS = [
 ];
 
 export default function Nav() {
-  const pathname = usePathname();
-  const router   = useRouter();
+  const { pathname } = useLocation();
+  const navigate = useNavigate();
   const [search,     setSearch]     = useState('');
   const [showSearch, setShowSearch] = useState(false);
   const searchRef = useRef<HTMLInputElement>(null);
@@ -45,12 +43,11 @@ export default function Nav() {
   );
 
   async function logout() {
-    // Call backend to clear HttpOnly cookie, then clear any legacy client-side tokens
     try { await fetch('/api/auth/logout', { method: 'POST', credentials: 'same-origin' }); } catch { /* best effort */ }
     clearToken();
-    router.push('/login');
+    navigate('/login');
   }
-  function navigate(href: string) { setShowSearch(false); setSearch(''); router.push(href); }
+  function goTo(href: string) { setShowSearch(false); setSearch(''); navigate(href); }
 
   return (
     <>
@@ -89,7 +86,7 @@ export default function Nav() {
           {NAV_LINKS.map(({ href, label, icon: Icon, color }) => {
             const active = pathname === href || pathname.startsWith(href + '/');
             return (
-              <Link key={href} href={href}
+              <Link key={href} to={href}
                 className={`group flex items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-medium transition-all duration-150
                   ${active ? 'text-white' : 'text-gray-500 hover:text-gray-200'}`}
                 style={active ? {
@@ -143,7 +140,7 @@ export default function Nav() {
               {filtered.length === 0
                 ? <p className="text-center text-sm text-gray-600 py-10">No results found</p>
                 : filtered.map(({ href, label, icon: Icon, color }) => (
-                  <button key={href} onClick={() => navigate(href)}
+                  <button key={href} onClick={() => goTo(href)}
                     className="w-full flex items-center gap-3 rounded-xl px-3 py-3 text-sm text-gray-400 hover:bg-white/[0.04] hover:text-gray-100 transition-all duration-150 text-left">
                     <div className={`flex h-8 w-8 items-center justify-center rounded-lg ${color}`}
                       style={{ background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.07)' }}>
@@ -155,7 +152,7 @@ export default function Nav() {
                 ))}
             </div>
             <div className="px-4 py-2.5 flex items-center gap-4" style={{ borderTop: '1px solid rgba(255,255,255,0.06)' }}>
-              <span className="text-[10px] text-gray-700"><kbd className="font-mono bg-white/5 border border-white/10 rounded px-1.5 py-0.5 mr-1">↵</kbd>select</span>
+              <span className="text-[10px] text-gray-700"><kbd className="font-mono bg-white/5 border border-white/10 rounded px-1.5 py-0.5 mr-1">&crarr;</kbd>select</span>
               <span className="text-[10px] text-gray-700"><kbd className="font-mono bg-white/5 border border-white/10 rounded px-1.5 py-0.5 mr-1">esc</kbd>close</span>
             </div>
           </div>

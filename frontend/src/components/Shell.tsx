@@ -1,9 +1,6 @@
-'use client';
 import Nav from './Nav';
 
 export default function Shell({ children }: { children: React.ReactNode }) {
-  // Auth is now handled server-side by Next.js middleware (checks HttpOnly cookie).
-  // No client-side localStorage check needed.
   return (
     <div className="flex min-h-screen bg-[#080810]">
       <Nav />
