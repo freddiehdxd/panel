@@ -161,6 +161,8 @@ mkdir -p /var/www/apps /var/log/panel
 chmod 755 /var/www/apps
 chmod +x "${PANEL_DIR}"/scripts/*.sh
 
+SERVER_IP="$(curl -fsSL --connect-timeout 5 https://api.ipify.org 2>/dev/null || hostname -I | awk '{print $1}')"
+
 cat > "${PANEL_DIR}/backend/.env" <<EOF
 PORT=4000
 NODE_ENV=production
@@ -174,7 +176,7 @@ NGINX_ENABLED=/etc/nginx/sites-enabled
 SCRIPTS_DIR=${PANEL_DIR}/scripts
 APP_PORT_START=3001
 APP_PORT_END=3999
-PANEL_ORIGIN=http://localhost
+PANEL_ORIGIN=http://${SERVER_IP}
 EOF
 
 ok "Config written to backend/.env"
@@ -224,13 +226,17 @@ else
   warn "Backend not responding yet — check: pm2 logs panel-backend"
 fi
 
-# ── NGINX config — static frontend + API proxy ───────────────────────────
-SERVER_IP="$(curl -fsSL --connect-timeout 5 https://api.ipify.org 2>/dev/null || hostname -I | awk '{print $1}')"
+# ── NGINX config — static frontend + API proxy + WebSocket ────────────────
 
 cat > /etc/nginx/sites-available/panel << 'NGINXCONF'
 # ServerPanel v2 — Go backend + Vite static frontend
 # Frontend: NGINX serves static files directly (0 MB runtime)
 # Backend: API proxied to Go binary on port 4000
+
+map $http_upgrade $connection_upgrade {
+    default upgrade;
+    ''      close;
+}
 
 server {
     listen 80 default_server;
@@ -242,10 +248,12 @@ server {
 
     client_max_body_size 100M;
 
-    # API — proxy to Go backend
+    # API — proxy to Go backend (includes WebSocket upgrade)
     location /api/ {
         proxy_pass         http://127.0.0.1:4000;
         proxy_http_version 1.1;
+        proxy_set_header   Upgrade $http_upgrade;
+        proxy_set_header   Connection $connection_upgrade;
         proxy_set_header   Host $host;
         proxy_set_header   X-Real-IP $remote_addr;
         proxy_set_header   X-Forwarded-For $proxy_add_x_forwarded_for;
@@ -429,28 +437,40 @@ NGINXSEC
 nginx -t > /dev/null 2>&1 && systemctl reload nginx
 ok "NGINX hardened — version hidden, security headers, buffer limits"
 
-# Bcrypt admin password using Go
+# Bcrypt admin password using a temp Go program within the backend module
 cd "${PANEL_DIR}/backend"
-BCRYPT_HASH=$(go run -ldflags="-s -w" <<'GOCODE' -- "${ADMIN_PASS}" 2>/dev/null || echo "")
+mkdir -p /tmp/panel-hash
+cat > /tmp/panel-hash/main.go <<'HASHGO'
 package main
+
 import (
-  "fmt"
-  "os"
-  "golang.org/x/crypto/bcrypt"
+	"fmt"
+	"os"
+
+	"golang.org/x/crypto/bcrypt"
 )
+
 func main() {
-  pass := os.Args[len(os.Args)-1]
-  hash, err := bcrypt.GenerateFromPassword([]byte(pass), 12)
-  if err != nil { os.Exit(1) }
-  fmt.Print(string(hash))
+	if len(os.Args) < 2 {
+		os.Exit(1)
+	}
+	hash, err := bcrypt.GenerateFromPassword([]byte(os.Args[1]), 12)
+	if err != nil {
+		os.Exit(1)
+	}
+	fmt.Print(string(hash))
 }
-GOCODE
+HASHGO
+cp go.mod /tmp/panel-hash/go.mod
+cp go.sum /tmp/panel-hash/go.sum
+BCRYPT_HASH=$(cd /tmp/panel-hash && go run main.go "${ADMIN_PASS}" 2>/dev/null || echo "")
+rm -rf /tmp/panel-hash
 
 if [ -n "$BCRYPT_HASH" ]; then
-  sed -i '/^ADMIN_PASSWORD=/d' .env
-  grep -q 'ADMIN_PASSWORD_HASH' .env && \
-    sed -i "s|^ADMIN_PASSWORD_HASH=.*|ADMIN_PASSWORD_HASH=$BCRYPT_HASH|" .env || \
-    echo "ADMIN_PASSWORD_HASH=$BCRYPT_HASH" >> .env
+  # Remove plaintext password line
+  sed -i '/^ADMIN_PASSWORD=/d' "${PANEL_DIR}/backend/.env"
+  # Write bcrypt hash wrapped in single quotes (preserves $ characters for godotenv)
+  echo "ADMIN_PASSWORD_HASH='${BCRYPT_HASH}'" >> "${PANEL_DIR}/backend/.env"
   ok "Admin password bcrypt-hashed (plaintext removed from .env)"
 else
   warn "Could not hash password — keeping plaintext (change manually later)"
