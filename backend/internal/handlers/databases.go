@@ -106,22 +106,15 @@ func (h *DatabasesHandler) Create(w http.ResponseWriter, r *http.Request) {
 	}
 	password := hex.EncodeToString(passwordBytes)
 
-	// Create PostgreSQL user with temp password, then alter to real password
-	// This avoids SQL injection since CREATE USER doesn't support parameterized passwords
+	// Create PostgreSQL user with the generated password
+	// DDL statements (CREATE USER, ALTER ROLE) do not support parameterized passwords ($1),
+	// so we use fmt.Sprintf. This is safe because:
+	//   1. body.User is validated by ValidatePgIdentifier (alphanumeric + underscore only)
+	//   2. password is hex-encoded random bytes (no special characters)
 	_, err = h.db.Exec(ctx,
-		fmt.Sprintf(`CREATE USER "%s" WITH PASSWORD 'temp_password'`, body.User))
+		fmt.Sprintf(`CREATE USER "%s" WITH PASSWORD '%s'`, body.User, password))
 	if err != nil {
 		Error(w, http.StatusInternalServerError, fmt.Sprintf("Failed to create user: %v", err))
-		return
-	}
-
-	// Set real password via ALTER ROLE with parameterized query
-	_, err = h.db.Exec(ctx,
-		fmt.Sprintf(`ALTER ROLE "%s" WITH PASSWORD $1`, body.User), password)
-	if err != nil {
-		// Rollback: drop user
-		h.db.Exec(ctx, fmt.Sprintf(`DROP USER IF EXISTS "%s"`, body.User))
-		Error(w, http.StatusInternalServerError, fmt.Sprintf("Failed to set password: %v", err))
 		return
 	}
 
