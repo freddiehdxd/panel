@@ -15,13 +15,15 @@ export default function LoginPage() {
     e.preventDefault();
     setLoading(true); setError('');
     const res = await api.post<{ token: string }>('/auth/login', creds);
-    setLoading(false);
     if (res.success) {
-      // Token is set as HttpOnly cookie by the backend — just redirect
-      router.replace('/dashboard');
-    } else {
-      setError(res.error ?? 'Invalid credentials');
+      // HttpOnly cookie is set by the backend response.
+      // Use hard redirect to ensure the full page load sends the cookie
+      // through Next.js middleware (client-side nav can race the cookie).
+      window.location.href = '/dashboard';
+      return; // keep loading spinner while redirecting
     }
+    setLoading(false);
+    setError(res.error ?? 'Invalid credentials');
   }
 
   return (
