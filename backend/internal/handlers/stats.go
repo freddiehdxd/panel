@@ -7,9 +7,7 @@ import (
 	"log"
 	"net/http"
 	"os"
-	"path/filepath"
 	"runtime"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -27,7 +25,6 @@ import (
 const (
 	collectInterval = 2 * time.Second
 	historySize     = 60 // 60 data points = 2 minutes at 2s interval
-	topProcessCount = 5
 )
 
 // StatsHandler handles system stats with background collection and WebSocket push
@@ -299,20 +296,18 @@ func (h *StatsHandler) doCollect() {
 	// System info
 	stats.System = readSystem()
 
-	// ---- Slow path: expensive ops every 5th tick (10s) ----
+	// ---- Slow path: PM2 apps every 5th tick (10s) ----
+	// Reads ~/.pm2/dump.pm2 + 2-3 pid files — near zero cost
 	h.slowTick++
 	if h.slowTick >= 5 {
 		h.slowTick = 0
 
-		// Top processes (iterates all /proc/[pid]/)
-		h.cachedProcs = readTopProcesses(h.totalMem)
-
-		// PM2 list (reads ~/.pm2/ files directly — no subprocess)
 		pm2List, err := h.pm2.ListFromProc()
 		if err == nil {
 			running := 0
 			stopped := 0
 			appList := make([]map[string]interface{}, 0, len(pm2List))
+			procs := make([]models.ProcessStats, 0, len(pm2List))
 			for _, p := range pm2List {
 				if p.Status == "online" {
 					running++
@@ -326,6 +321,19 @@ func (h *StatsHandler) doCollect() {
 					"memory": p.Memory,
 					"uptime": p.Uptime,
 				})
+				// Build process list from PM2 data (no full /proc scan)
+				var memPct float64
+				if h.totalMem > 0 {
+					memPct = round2(float64(p.Memory) / float64(h.totalMem) * 100)
+				}
+				procs = append(procs, models.ProcessStats{
+					PID:    p.PmID,
+					Name:   p.Name,
+					CPU:    p.CPU,
+					Memory: p.Memory,
+					MemPct: memPct,
+					User:   "root",
+				})
 			}
 			h.cachedApps = models.AppsStats{
 				Total:   len(pm2List),
@@ -333,6 +341,7 @@ func (h *StatsHandler) doCollect() {
 				Stopped: stopped,
 				List:    appList,
 			}
+			h.cachedProcs = procs
 		}
 	}
 
@@ -777,192 +786,6 @@ func readSystem() models.SystemStats {
 		Platform: runtime.GOOS,
 		Arch:     runtime.GOARCH,
 	}
-}
-
-// ---- Top Processes ----
-
-func readTopProcesses(totalMem int64) []models.ProcessStats {
-	entries, err := os.ReadDir("/proc")
-	if err != nil {
-		return nil
-	}
-
-	// Read system-wide CPU times for process CPU% calculation
-	sysJiffies := readTotalJiffies()
-
-	type procInfo struct {
-		pid     int
-		name    string
-		cpu     uint64 // utime + stime
-		rss     int64  // pages
-		user    string
-		command string
-	}
-
-	var procs []procInfo
-
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue
-		}
-		pid, err := strconv.Atoi(entry.Name())
-		if err != nil || pid < 1 {
-			continue
-		}
-
-		// Read /proc/[pid]/stat
-		statData, err := os.ReadFile(filepath.Join("/proc", entry.Name(), "stat"))
-		if err != nil {
-			continue
-		}
-
-		// Parse: pid (comm) state ...
-		statStr := string(statData)
-		// Find the closing paren to handle spaces in comm
-		closeIdx := strings.LastIndex(statStr, ")")
-		if closeIdx < 0 || closeIdx+2 >= len(statStr) {
-			continue
-		}
-		// Name is between first ( and last )
-		openIdx := strings.Index(statStr, "(")
-		name := ""
-		if openIdx >= 0 && closeIdx > openIdx {
-			name = statStr[openIdx+1 : closeIdx]
-		}
-
-		rest := strings.Fields(statStr[closeIdx+2:])
-		if len(rest) < 22 {
-			continue
-		}
-
-		utime, _ := strconv.ParseUint(rest[11], 10, 64) // field 14 (0-indexed from after comm: 11)
-		stime, _ := strconv.ParseUint(rest[12], 10, 64) // field 15
-		rss, _ := strconv.ParseInt(rest[21], 10, 64)     // field 24
-
-		// Read /proc/[pid]/status for user
-		user := ""
-		if statusData, err := os.ReadFile(filepath.Join("/proc", entry.Name(), "status")); err == nil {
-			for _, line := range strings.Split(string(statusData), "\n") {
-				if strings.HasPrefix(line, "Uid:") {
-					fields := strings.Fields(line)
-					if len(fields) >= 2 {
-						user = uidToName(fields[1])
-					}
-					break
-				}
-			}
-		}
-
-		// Read /proc/[pid]/cmdline for full command
-		command := name
-		if cmdData, err := os.ReadFile(filepath.Join("/proc", entry.Name(), "cmdline")); err == nil && len(cmdData) > 0 {
-			cmd := strings.ReplaceAll(string(cmdData), "\x00", " ")
-			cmd = strings.TrimSpace(cmd)
-			if len(cmd) > 80 {
-				cmd = cmd[:80]
-			}
-			if cmd != "" {
-				command = cmd
-			}
-		}
-
-		procs = append(procs, procInfo{
-			pid:     pid,
-			name:    name,
-			cpu:     utime + stime,
-			rss:     rss,
-			user:    user,
-			command: command,
-		})
-	}
-
-	// Sort by CPU+RSS (combined score)
-	pageSize := int64(os.Getpagesize())
-	sort.Slice(procs, func(i, j int) bool {
-		// Sort by RSS descending as primary (memory usage is more stable)
-		return procs[i].rss > procs[j].rss
-	})
-
-	// Take top N
-	count := topProcessCount
-	if len(procs) < count {
-		count = len(procs)
-	}
-
-	result := make([]models.ProcessStats, 0, count)
-	for i := 0; i < count; i++ {
-		p := procs[i]
-		memBytes := p.rss * pageSize
-		var memPct float64
-		if totalMem > 0 {
-			memPct = round2(float64(memBytes) / float64(totalMem) * 100)
-		}
-		var cpuPct float64
-		if sysJiffies > 0 {
-			cpuPct = round2(float64(p.cpu) / float64(sysJiffies) * 100 * float64(runtime.NumCPU()))
-		}
-
-		result = append(result, models.ProcessStats{
-			PID:     p.pid,
-			Name:    p.name,
-			CPU:     cpuPct,
-			Memory:  memBytes,
-			MemPct:  memPct,
-			User:    p.user,
-			Command: p.command,
-		})
-	}
-
-	return result
-}
-
-func readTotalJiffies() uint64 {
-	f, err := os.Open("/proc/stat")
-	if err != nil {
-		return 0
-	}
-	defer f.Close()
-
-	scanner := bufio.NewScanner(f)
-	if scanner.Scan() {
-		fields := strings.Fields(scanner.Text())
-		if len(fields) >= 9 && fields[0] == "cpu" {
-			var total uint64
-			for _, f := range fields[1:] {
-				v, _ := strconv.ParseUint(f, 10, 64)
-				total += v
-			}
-			return total
-		}
-	}
-	return 0
-}
-
-var uidCache sync.Map
-
-func uidToName(uid string) string {
-	if v, ok := uidCache.Load(uid); ok {
-		return v.(string)
-	}
-
-	// Try /etc/passwd
-	f, err := os.Open("/etc/passwd")
-	if err != nil {
-		return uid
-	}
-	defer f.Close()
-
-	scanner := bufio.NewScanner(f)
-	for scanner.Scan() {
-		parts := strings.SplitN(scanner.Text(), ":", 4)
-		if len(parts) >= 3 && parts[2] == uid {
-			uidCache.Store(uid, parts[0])
-			return parts[0]
-		}
-	}
-
-	uidCache.Store(uid, uid)
-	return uid
 }
 
 // ---- Helpers ----
