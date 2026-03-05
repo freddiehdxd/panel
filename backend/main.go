@@ -56,7 +56,7 @@ func main() {
 	redisHandler := handlers.NewRedisHandler(exec)
 	filesHandler := handlers.NewFilesHandler(cfg)
 	logsHandler := handlers.NewLogsHandler(pm2, exec)
-	statsHandler := handlers.NewStatsHandler(pm2)
+	statsHandler := handlers.NewStatsHandler(pm2, cfg)
 
 	// Create router
 	r := chi.NewRouter()
@@ -84,6 +84,9 @@ func main() {
 		uptime := time.Since(startTime).Seconds()
 		fmt.Fprintf(w, `{"ok":true,"uptime":%.0f}`, uptime)
 	})
+
+	// WebSocket for live stats (auth checked inside handler)
+	r.Get("/api/stats/ws", statsHandler.WebSocket)
 
 	// Auth routes (no auth middleware)
 	r.Route("/api/auth", func(r chi.Router) {

@@ -85,3 +85,14 @@ func GetUsername(r *http.Request) string {
 	}
 	return "anonymous"
 }
+
+// ValidateToken checks if a JWT token string is valid (used by WebSocket auth)
+func ValidateToken(tokenStr, jwtSecret string) bool {
+	token, err := jwt.ParseWithClaims(tokenStr, &JWTClaims{}, func(token *jwt.Token) (interface{}, error) {
+		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
+			return nil, jwt.ErrSignatureInvalid
+		}
+		return []byte(jwtSecret), nil
+	})
+	return err == nil && token.Valid
+}

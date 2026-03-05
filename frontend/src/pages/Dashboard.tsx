@@ -1,45 +1,120 @@
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   Server, Globe, ShieldCheck, Database, RotateCcw,
   Square, Cpu, HardDrive, Activity,
-  ArrowUpRight, Play, Zap, Clock, TrendingUp, MemoryStick,
+  ArrowUpRight, Play, Zap, Clock, MemoryStick,
+  Network, ArrowDown, ArrowUp, Disc,
 } from 'lucide-react';
 import Shell from '@/components/Shell';
 import StatusBadge from '@/components/StatusBadge';
 import { api, App } from '@/lib/api';
 
+/* ---- Types ---- */
+
 interface Stats {
-  cpu:    { usage: number; cores: number; model: string; loadAvg: number[] };
-  memory: { total: number; used: number; free: number; percent: number };
-  disk:   { total: number; used: number; percent: number };
-  system: { uptime: string; hostname: string };
-  apps:   { total: number; running: number; stopped: number };
+  cpu:       { usage: number; cores: number; model: string; loadAvg: number[]; perCore: number[] };
+  memory:    { total: number; used: number; free: number; percent: number };
+  disk:      { total: number; used: number; percent: number };
+  network:   { rxBytesPerSec: number; txBytesPerSec: number; rxTotal: number; txTotal: number; interface: string };
+  diskIO:    { readBytesPerSec: number; writeBytesPerSec: number; readTotal: number; writeTotal: number; device: string };
+  system:    { uptime: string; hostname: string };
+  apps:      { total: number; running: number; stopped: number };
+  processes: ProcessInfo[];
 }
+
+interface ProcessInfo {
+  pid: number; name: string; cpu: number; memory: number;
+  memPct: number; user: string; command: string;
+}
+
+interface StatsHistory {
+  timestamps: number[];
+  cpu: number[];
+  memory: number[];
+  diskRead: number[];
+  diskWrite: number[];
+  netRx: number[];
+  netTx: number[];
+}
+
+interface LivePayload {
+  current: Stats;
+  history: StatsHistory;
+}
+
+/* ---- Helpers ---- */
 
 function bytes(b: number): string {
   if (b >= 1e9) return (b / 1e9).toFixed(1) + ' GB';
   if (b >= 1e6) return (b / 1e6).toFixed(0) + ' MB';
-  return (b / 1e3).toFixed(0) + ' KB';
+  if (b >= 1e3) return (b / 1e3).toFixed(0) + ' KB';
+  return b + ' B';
 }
+
+function speed(bps: number): string {
+  if (bps >= 1e6) return (bps / 1e6).toFixed(1) + ' MB/s';
+  if (bps >= 1e3) return (bps / 1e3).toFixed(1) + ' KB/s';
+  return bps + ' B/s';
+}
+
+/* ---- Ring Gauge ---- */
 
 function RingGauge({ value, color, size = 72 }: { value: number; color: string; size?: number }) {
   const r = (size - 8) / 2;
   const circ = 2 * Math.PI * r;
-  const dash = circ * (1 - value / 100);
+  const dash = circ * (1 - Math.min(value, 100) / 100);
   return (
     <svg width={size} height={size} style={{ transform: 'rotate(-90deg)' }}>
       <circle cx={size/2} cy={size/2} r={r} fill="none" stroke="rgba(255,255,255,0.05)" strokeWidth="5" />
       <circle cx={size/2} cy={size/2} r={r} fill="none" stroke={color} strokeWidth="5"
         strokeDasharray={circ} strokeDashoffset={dash} strokeLinecap="round"
-        style={{ transition: 'stroke-dashoffset 1s ease-out', filter: `drop-shadow(0 0 6px ${color}80)` }} />
+        style={{ transition: 'stroke-dashoffset 0.8s ease-out', filter: `drop-shadow(0 0 6px ${color}80)` }} />
     </svg>
   );
 }
 
-function StatCard({ title, value, sub, icon: Icon, color, ring, ringColor }: {
+/* ---- Sparkline ---- */
+
+function Sparkline({ data, color, height = 32, width = 120 }: {
+  data: number[]; color: string; height?: number; width?: number;
+}) {
+  if (data.length < 2) return null;
+  const max = Math.max(...data, 1);
+  const min = Math.min(...data, 0);
+  const range = max - min || 1;
+  const step = width / (data.length - 1);
+
+  const points = data.map((v, i) => {
+    const x = i * step;
+    const y = height - ((v - min) / range) * (height - 4) - 2;
+    return `${x},${y}`;
+  }).join(' ');
+
+  const areaPoints = `0,${height} ${points} ${width},${height}`;
+
+  return (
+    <svg width={width} height={height} className="overflow-visible">
+      <defs>
+        <linearGradient id={`sg-${color.replace('#','')}`} x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stopColor={color} stopOpacity="0.3" />
+          <stop offset="100%" stopColor={color} stopOpacity="0" />
+        </linearGradient>
+      </defs>
+      <polygon points={areaPoints} fill={`url(#sg-${color.replace('#','')})`} />
+      <polyline points={points} fill="none" stroke={color} strokeWidth="1.5"
+        strokeLinejoin="round" strokeLinecap="round" style={{ filter: `drop-shadow(0 0 3px ${color}60)` }} />
+    </svg>
+  );
+}
+
+/* ---- Stat Card ---- */
+
+function StatCard({ title, value, sub, icon: Icon, color, ring, ringColor, sparkData, sparkColor }: {
   title: string; value: string; sub: string;
-  icon: React.ElementType; color: string; ring?: number; ringColor?: string;
+  icon: React.ElementType; color: string;
+  ring?: number; ringColor?: string;
+  sparkData?: number[]; sparkColor?: string;
 }) {
   return (
     <div className="card relative overflow-hidden group hover:border-white/[0.12] transition-all duration-300 cursor-default"
@@ -53,7 +128,12 @@ function StatCard({ title, value, sub, icon: Icon, color, ring, ringColor }: {
           <p className="text-xs text-gray-600 truncate">{sub}</p>
           {ring !== undefined && (
             <div className="mt-4 progress">
-              <div className="progress-bar" style={{ width: `${ring}%`, background: ringColor }} />
+              <div className="progress-bar" style={{ width: `${Math.min(ring, 100)}%`, background: ringColor }} />
+            </div>
+          )}
+          {sparkData && sparkData.length > 1 && (
+            <div className="mt-3">
+              <Sparkline data={sparkData} color={sparkColor || color} height={28} width={140} />
             </div>
           )}
         </div>
@@ -61,7 +141,7 @@ function StatCard({ title, value, sub, icon: Icon, color, ring, ringColor }: {
           ? <div className="relative shrink-0">
               <RingGauge value={ring} color={ringColor ?? '#8b5cf6'} />
               <div className="absolute inset-0 flex items-center justify-center">
-                <span className="text-xs font-bold text-gray-300">{ring}%</span>
+                <span className="text-xs font-bold text-gray-300">{Math.round(ring)}%</span>
               </div>
             </div>
           : <div className="flex h-11 w-11 items-center justify-center rounded-2xl shrink-0"
@@ -74,31 +154,206 @@ function StatCard({ title, value, sub, icon: Icon, color, ring, ringColor }: {
   );
 }
 
+/* ---- Per-Core CPU Bars ---- */
+
+function CoreBars({ perCore }: { perCore: number[] }) {
+  if (!perCore || perCore.length === 0) return null;
+  return (
+    <div className="card p-4" style={{ background: 'rgba(255,255,255,0.02)' }}>
+      <p className="text-[11px] font-semibold text-gray-600 uppercase tracking-widest mb-3">CPU Cores</p>
+      <div className="grid gap-1.5">
+        {perCore.map((usage, i) => (
+          <div key={i} className="flex items-center gap-2">
+            <span className="text-[10px] text-gray-600 w-6 text-right font-mono">C{i}</span>
+            <div className="flex-1 h-2 rounded-full overflow-hidden" style={{ background: 'rgba(255,255,255,0.05)' }}>
+              <div className="h-full rounded-full transition-all duration-700"
+                style={{
+                  width: `${Math.min(usage, 100)}%`,
+                  background: usage > 80 ? '#ef4444' : usage > 50 ? '#f59e0b' : '#8b5cf6',
+                  boxShadow: usage > 50 ? `0 0 8px ${usage > 80 ? '#ef4444' : '#f59e0b'}40` : 'none',
+                }} />
+            </div>
+            <span className="text-[10px] text-gray-500 w-8 text-right font-mono">{Math.round(usage)}%</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/* ---- I/O Card ---- */
+
+function IOCard({ title, icon: Icon, color, inLabel, outLabel, inValue, outValue, sparkIn, sparkOut }: {
+  title: string; icon: React.ElementType; color: string;
+  inLabel: string; outLabel: string; inValue: string; outValue: string;
+  sparkIn?: number[]; sparkOut?: number[];
+}) {
+  return (
+    <div className="card p-4" style={{ background: 'rgba(255,255,255,0.02)' }}>
+      <div className="flex items-center gap-2 mb-3">
+        <div className="h-7 w-7 flex items-center justify-center rounded-xl shrink-0"
+          style={{ background: `${color}12`, border: `1px solid ${color}22` }}>
+          <Icon size={14} style={{ color }} />
+        </div>
+        <p className="text-[11px] font-semibold text-gray-600 uppercase tracking-widest">{title}</p>
+      </div>
+      <div className="grid grid-cols-2 gap-3">
+        <div>
+          <div className="flex items-center gap-1 mb-1">
+            <ArrowDown size={10} className="text-emerald-500" />
+            <span className="text-[10px] text-gray-600 uppercase">{inLabel}</span>
+          </div>
+          <p className="text-sm font-bold text-white">{inValue}</p>
+          {sparkIn && sparkIn.length > 1 && (
+            <div className="mt-2">
+              <Sparkline data={sparkIn} color="#10b981" height={24} width={100} />
+            </div>
+          )}
+        </div>
+        <div>
+          <div className="flex items-center gap-1 mb-1">
+            <ArrowUp size={10} className="text-blue-400" />
+            <span className="text-[10px] text-gray-600 uppercase">{outLabel}</span>
+          </div>
+          <p className="text-sm font-bold text-white">{outValue}</p>
+          {sparkOut && sparkOut.length > 1 && (
+            <div className="mt-2">
+              <Sparkline data={sparkOut} color="#3b82f6" height={24} width={100} />
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ---- Top Processes ---- */
+
+function TopProcesses({ processes }: { processes: ProcessInfo[] }) {
+  if (!processes || processes.length === 0) return null;
+  return (
+    <div className="card p-4" style={{ background: 'rgba(255,255,255,0.02)' }}>
+      <p className="text-[11px] font-semibold text-gray-600 uppercase tracking-widest mb-3">Top Processes</p>
+      <div className="space-y-1.5">
+        <div className="grid grid-cols-[1fr_60px_70px_50px] gap-2 text-[10px] text-gray-700 uppercase font-semibold tracking-wider px-1">
+          <span>Process</span>
+          <span className="text-right">CPU</span>
+          <span className="text-right">Memory</span>
+          <span className="text-right">PID</span>
+        </div>
+        {processes.map((p) => (
+          <div key={p.pid}
+            className="grid grid-cols-[1fr_60px_70px_50px] gap-2 items-center rounded-lg px-2 py-1.5 hover:bg-white/[0.03] transition-colors">
+            <div className="min-w-0">
+              <p className="text-xs text-gray-300 font-medium truncate">{p.name}</p>
+              <p className="text-[10px] text-gray-700 font-mono truncate">{p.user}</p>
+            </div>
+            <div className="text-right">
+              <span className="text-xs font-mono text-gray-400">{p.cpu.toFixed(1)}%</span>
+            </div>
+            <div className="text-right">
+              <span className="text-xs font-mono text-gray-400">{bytes(p.memory)}</span>
+              <span className="text-[10px] text-gray-700 ml-1">{p.memPct.toFixed(1)}%</span>
+            </div>
+            <div className="text-right">
+              <span className="text-[10px] font-mono text-gray-600">{p.pid}</span>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/* ---- Dashboard Page ---- */
+
 export default function DashboardPage() {
   const navigate = useNavigate();
-  const [apps,   setApps]   = useState<App[]>([]);
-  const [stats,  setStats]  = useState<Stats | null>(null);
+  const [apps, setApps] = useState<App[]>([]);
+  const [stats, setStats] = useState<Stats | null>(null);
+  const [history, setHistory] = useState<StatsHistory | null>(null);
   const [acting, setActing] = useState<string | null>(null);
+  const [wsConnected, setWsConnected] = useState(false);
+  const wsRef = useRef<WebSocket | null>(null);
+  const reconnectRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const fetchAll = useCallback(async () => {
-    const [appsRes, statsRes] = await Promise.all([
-      api.get<App[]>('/apps'),
-      api.get<Stats>('/stats'),
-    ]);
-    if (appsRes.success && appsRes.data) setApps(appsRes.data);
-    if (statsRes.success && statsRes.data) setStats(statsRes.data);
+  // Fetch apps list (not included in WebSocket payload)
+  const fetchApps = useCallback(async () => {
+    const res = await api.get<App[]>('/apps');
+    if (res.success && res.data) setApps(res.data);
   }, []);
 
-  useEffect(() => { fetchAll(); }, [fetchAll]);
+  // WebSocket connection
   useEffect(() => {
-    const id = setInterval(fetchAll, 15000);
+    let mounted = true;
+
+    function connect() {
+      const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+      const ws = new WebSocket(`${proto}//${window.location.host}/api/stats/ws`);
+
+      ws.onopen = () => {
+        if (mounted) setWsConnected(true);
+      };
+
+      ws.onmessage = (evt) => {
+        try {
+          const payload: LivePayload = JSON.parse(evt.data);
+          if (mounted && payload.current) {
+            setStats(payload.current);
+            setHistory(payload.history);
+          }
+        } catch { /* ignore parse errors */ }
+      };
+
+      ws.onclose = () => {
+        if (mounted) {
+          setWsConnected(false);
+          // Reconnect after 3 seconds
+          reconnectRef.current = setTimeout(() => {
+            if (mounted) connect();
+          }, 3000);
+        }
+      };
+
+      ws.onerror = () => {
+        ws.close();
+      };
+
+      wsRef.current = ws;
+    }
+
+    connect();
+
+    return () => {
+      mounted = false;
+      if (reconnectRef.current) clearTimeout(reconnectRef.current);
+      if (wsRef.current) wsRef.current.close();
+    };
+  }, []);
+
+  // Fallback: if WebSocket fails, poll HTTP
+  useEffect(() => {
+    if (wsConnected) return;
+    const fetchStats = async () => {
+      const res = await api.get<Stats>('/stats');
+      if (res.success && res.data) setStats(res.data);
+    };
+    fetchStats();
+    const id = setInterval(fetchStats, 5000);
     return () => clearInterval(id);
-  }, [fetchAll]);
+  }, [wsConnected]);
+
+  // Fetch apps on mount and periodically
+  useEffect(() => { fetchApps(); }, [fetchApps]);
+  useEffect(() => {
+    const id = setInterval(fetchApps, 15000);
+    return () => clearInterval(id);
+  }, [fetchApps]);
 
   async function doAction(name: string, action: string) {
     setActing(name + action);
     await api.post(`/apps/${name}/action`, { action });
-    await fetchAll();
+    await fetchApps();
     setActing(null);
   }
 
@@ -111,14 +366,17 @@ export default function DashboardPage() {
         <div>
           <h1 className="text-2xl font-bold text-white">Dashboard</h1>
           <p className="text-sm text-gray-600 mt-1">
-            {stats ? `${stats.system.hostname} · Up ${stats.system.uptime}` : 'Loading system info…'}
+            {stats ? `${stats.system.hostname} · Up ${stats.system.uptime}` : 'Loading system info...'}
           </p>
         </div>
         <div className="flex items-center gap-3">
           <span className="flex items-center gap-2 rounded-xl px-3 py-2 text-xs text-gray-500"
-            style={{ background: 'rgba(16,185,129,0.06)', border: '1px solid rgba(16,185,129,0.15)' }}>
-            <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse inline-block" />
-            <span className="text-emerald-500 font-medium">Live</span>
+            style={{ background: wsConnected ? 'rgba(16,185,129,0.06)' : 'rgba(245,158,11,0.06)',
+                     border: `1px solid ${wsConnected ? 'rgba(16,185,129,0.15)' : 'rgba(245,158,11,0.15)'}` }}>
+            <span className={`h-1.5 w-1.5 rounded-full inline-block ${wsConnected ? 'bg-emerald-400 animate-pulse' : 'bg-amber-400'}`} />
+            <span className={`font-medium ${wsConnected ? 'text-emerald-500' : 'text-amber-500'}`}>
+              {wsConnected ? 'Live 2s' : 'Polling'}
+            </span>
           </span>
           <button onClick={() => navigate('/apps')} className="btn-primary">
             <Zap size={13} /> Deploy App
@@ -126,17 +384,19 @@ export default function DashboardPage() {
         </div>
       </div>
 
-      {/* Server stat cards */}
+      {/* Main stat cards */}
       {stats ? (
-        <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-6 animate-slide-up">
+        <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-4 animate-slide-up">
           <StatCard title="CPU" icon={Cpu}
             value={`${stats.cpu.usage}%`}
             sub={`${stats.cpu.cores} cores · ${stats.cpu.loadAvg[0]} load`}
-            color="#8b5cf6" ring={stats.cpu.usage} ringColor="#8b5cf6" />
+            color="#8b5cf6" ring={stats.cpu.usage} ringColor="#8b5cf6"
+            sparkData={history?.cpu} sparkColor="#8b5cf6" />
           <StatCard title="Memory" icon={MemoryStick}
             value={bytes(stats.memory.used)}
             sub={`${bytes(stats.memory.free)} free of ${bytes(stats.memory.total)}`}
-            color="#3b82f6" ring={stats.memory.percent} ringColor="#3b82f6" />
+            color="#3b82f6" ring={stats.memory.percent} ringColor="#3b82f6"
+            sparkData={history?.memory} sparkColor="#3b82f6" />
           <StatCard title="Disk" icon={HardDrive}
             value={bytes(stats.disk.used)}
             sub={`${stats.disk.percent}% of disk used`}
@@ -147,10 +407,28 @@ export default function DashboardPage() {
             color="#10b981" />
         </div>
       ) : (
-        <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
+        <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-4">
           {[...Array(4)].map((_, i) => (
-            <div key={i} className="card h-32 shimmer" style={{ background: 'rgba(255,255,255,0.02)' }} />
+            <div key={i} className="card h-36 shimmer" style={{ background: 'rgba(255,255,255,0.02)' }} />
           ))}
+        </div>
+      )}
+
+      {/* Per-core CPU + Network I/O + Disk I/O + Top Processes */}
+      {stats && (
+        <div className="grid grid-cols-1 lg:grid-cols-4 gap-4 mb-6 animate-slide-up">
+          <CoreBars perCore={stats.cpu.perCore} />
+          <IOCard title="Network" icon={Network} color="#06b6d4"
+            inLabel="Download" outLabel="Upload"
+            inValue={speed(stats.network.rxBytesPerSec)}
+            outValue={speed(stats.network.txBytesPerSec)}
+            sparkIn={history?.netRx} sparkOut={history?.netTx} />
+          <IOCard title="Disk I/O" icon={Disc} color="#f59e0b"
+            inLabel="Read" outLabel="Write"
+            inValue={speed(stats.diskIO.readBytesPerSec)}
+            outValue={speed(stats.diskIO.writeBytesPerSec)}
+            sparkIn={history?.diskRead} sparkOut={history?.diskWrite} />
+          <TopProcesses processes={stats.processes} />
         </div>
       )}
 
@@ -191,7 +469,7 @@ export default function DashboardPage() {
             <Server size={28} className="text-violet-500" />
           </div>
           <p className="text-gray-300 font-semibold mb-1">No apps deployed</p>
-          <p className="text-gray-600 text-sm mb-6">Deploy your first Next.js application to get started</p>
+          <p className="text-gray-600 text-sm mb-6">Deploy your first application to get started</p>
           <button onClick={() => navigate('/apps')} className="btn-primary">
             <Zap size={14} /> Deploy First App
           </button>
@@ -250,7 +528,7 @@ export default function DashboardPage() {
                     </div>
                   </td>
                   <td className="td">
-                    <span className="text-xs text-gray-500">{app.memory > 0 ? bytes(app.memory) : '—'}</span>
+                    <span className="text-xs text-gray-500">{app.memory > 0 ? bytes(app.memory) : '---'}</span>
                   </td>
                   <td className="td">
                     <div className="flex items-center gap-1">
@@ -267,7 +545,7 @@ export default function DashboardPage() {
                       <button onClick={() => navigate('/logs?app=' + app.name)}
                         title="View logs"
                         className="p-1.5 rounded-lg text-gray-700 hover:text-blue-400 hover:bg-blue-500/10 transition-all">
-                        <TrendingUp size={13} />
+                        <Activity size={13} />
                       </button>
                     </div>
                   </td>
@@ -280,11 +558,12 @@ export default function DashboardPage() {
 
       {/* System footer info */}
       {stats && (
-        <div className="mt-5 grid grid-cols-3 gap-3">
+        <div className="mt-5 grid grid-cols-2 sm:grid-cols-4 gap-3">
           {[
-            { label: 'CPU Model', value: stats.cpu.model.split('@')[0]?.trim() ?? '—', icon: Cpu },
-            { label: 'Load Average', value: stats.cpu.loadAvg.map(String).join(' · '), icon: Activity },
+            { label: 'CPU Model', value: stats.cpu.model.split('@')[0]?.trim() ?? '---', icon: Cpu },
+            { label: 'Load Average', value: stats.cpu.loadAvg.map(v => v.toFixed(2)).join(' / '), icon: Activity },
             { label: 'System Uptime', value: stats.system.uptime, icon: Clock },
+            { label: 'Network', value: `${stats.network.interface} · ${bytes(stats.network.rxTotal)} rx`, icon: Network },
           ].map(({ label, value, icon: Icon }) => (
             <div key={label} className="flex items-center gap-3 rounded-xl px-4 py-3"
               style={{ background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.05)' }}>

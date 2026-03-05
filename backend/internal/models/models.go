@@ -52,20 +52,30 @@ type Pm2Process struct {
 	Uptime int64   `json:"uptime"`
 }
 
-// Stats represents system statistics
+// Stats represents system statistics (current snapshot)
 type Stats struct {
-	CPU    CPUStats    `json:"cpu"`
-	Memory MemoryStats `json:"memory"`
-	Disk   DiskStats   `json:"disk"`
-	System SystemStats `json:"system"`
-	Apps   AppsStats   `json:"apps"`
+	CPU       CPUStats       `json:"cpu"`
+	Memory    MemoryStats    `json:"memory"`
+	Disk      DiskStats      `json:"disk"`
+	Network   NetworkStats   `json:"network"`
+	DiskIO    DiskIOStats    `json:"diskIO"`
+	System    SystemStats    `json:"system"`
+	Apps      AppsStats      `json:"apps"`
+	Processes []ProcessStats `json:"processes"`
+}
+
+// LiveStats is the full payload sent over WebSocket (current + history)
+type LiveStats struct {
+	Current *Stats       `json:"current"`
+	History StatsHistory `json:"history"`
 }
 
 type CPUStats struct {
-	Usage   float64   `json:"usage"`
-	Cores   int       `json:"cores"`
-	Model   string    `json:"model"`
-	LoadAvg []float64 `json:"loadAvg"`
+	Usage   float64      `json:"usage"`
+	Cores   int          `json:"cores"`
+	Model   string       `json:"model"`
+	LoadAvg []float64    `json:"loadAvg"`
+	PerCore []float64    `json:"perCore"`
 }
 
 type MemoryStats struct {
@@ -81,6 +91,32 @@ type DiskStats struct {
 	Percent float64 `json:"percent"`
 }
 
+type NetworkStats struct {
+	RxBytesPerSec int64  `json:"rxBytesPerSec"`
+	TxBytesPerSec int64  `json:"txBytesPerSec"`
+	RxTotal       int64  `json:"rxTotal"`
+	TxTotal       int64  `json:"txTotal"`
+	Interface     string `json:"interface"`
+}
+
+type DiskIOStats struct {
+	ReadBytesPerSec  int64  `json:"readBytesPerSec"`
+	WriteBytesPerSec int64  `json:"writeBytesPerSec"`
+	ReadTotal        int64  `json:"readTotal"`
+	WriteTotal       int64  `json:"writeTotal"`
+	Device           string `json:"device"`
+}
+
+type ProcessStats struct {
+	PID     int     `json:"pid"`
+	Name    string  `json:"name"`
+	CPU     float64 `json:"cpu"`
+	Memory  int64   `json:"memory"`
+	MemPct  float64 `json:"memPct"`
+	User    string  `json:"user"`
+	Command string  `json:"command"`
+}
+
 type SystemStats struct {
 	Uptime   string `json:"uptime"`
 	Hostname string `json:"hostname"`
@@ -93,6 +129,17 @@ type AppsStats struct {
 	Running int         `json:"running"`
 	Stopped int         `json:"stopped"`
 	List    interface{} `json:"list"`
+}
+
+// StatsHistory holds ring buffer data points for sparkline charts
+type StatsHistory struct {
+	Timestamps []int64   `json:"timestamps"` // unix seconds
+	CPU        []float64 `json:"cpu"`
+	Memory     []float64 `json:"memory"`
+	DiskRead   []int64   `json:"diskRead"`
+	DiskWrite  []int64   `json:"diskWrite"`
+	NetRx      []int64   `json:"netRx"`
+	NetTx      []int64   `json:"netTx"`
 }
 
 // ExecResult holds the result of a command execution
