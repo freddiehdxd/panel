@@ -54,14 +54,17 @@ type Pm2Process struct {
 
 // Stats represents system statistics (current snapshot)
 type Stats struct {
-	CPU       CPUStats       `json:"cpu"`
-	Memory    MemoryStats    `json:"memory"`
-	Disk      DiskStats      `json:"disk"`
-	Network   NetworkStats   `json:"network"`
-	DiskIO    DiskIOStats    `json:"diskIO"`
-	System    SystemStats    `json:"system"`
-	Apps      AppsStats      `json:"apps"`
-	Processes []ProcessStats `json:"processes"`
+	CPU        CPUStats           `json:"cpu"`
+	Memory     MemoryStats        `json:"memory"`
+	Disk       DiskStats          `json:"disk"`
+	Network    NetworkStats       `json:"network"`
+	Networks   []NetworkInterface `json:"networks"`
+	DiskIO     DiskIOStats        `json:"diskIO"`
+	System     SystemStats        `json:"system"`
+	Apps       AppsStats          `json:"apps"`
+	Processes  []ProcessStats     `json:"processes"`
+	DbTotal    int                `json:"dbTotal"`
+	SiteTotal  int                `json:"siteTotal"`
 }
 
 // LiveStats is the full payload sent over WebSocket (current + history)
@@ -71,11 +74,33 @@ type LiveStats struct {
 }
 
 type CPUStats struct {
-	Usage   float64      `json:"usage"`
-	Cores   int          `json:"cores"`
-	Model   string       `json:"model"`
-	LoadAvg []float64    `json:"loadAvg"`
-	PerCore []float64    `json:"perCore"`
+	Usage   float64   `json:"usage"`
+	Cores   int       `json:"cores"`
+	Model   string    `json:"model"`
+	LoadAvg []float64 `json:"loadAvg"`
+	PerCore []float64 `json:"perCore"`
+	Times   CPUTimes  `json:"times"`
+	Load    LoadInfo  `json:"load"`
+}
+
+type CPUTimes struct {
+	User    float64 `json:"user"`
+	Nice    float64 `json:"nice"`
+	System  float64 `json:"system"`
+	Idle    float64 `json:"idle"`
+	IOWait  float64 `json:"iowait"`
+	IRQ     float64 `json:"irq"`
+	SoftIRQ float64 `json:"softirq"`
+	Steal   float64 `json:"steal"`
+}
+
+type LoadInfo struct {
+	One     float64 `json:"one"`
+	Five    float64 `json:"five"`
+	Fifteen float64 `json:"fifteen"`
+	Max     int     `json:"max"`     // cores * 2
+	Limit   int     `json:"limit"`   // cores
+	Safe    int     `json:"safe"`    // cores * 75%
 }
 
 type MemoryStats struct {
@@ -96,7 +121,19 @@ type NetworkStats struct {
 	TxBytesPerSec int64  `json:"txBytesPerSec"`
 	RxTotal       int64  `json:"rxTotal"`
 	TxTotal       int64  `json:"txTotal"`
+	RxPackets     int64  `json:"rxPackets"`
+	TxPackets     int64  `json:"txPackets"`
 	Interface     string `json:"interface"`
+}
+
+type NetworkInterface struct {
+	Name          string `json:"name"`
+	RxBytesPerSec int64  `json:"rxBytesPerSec"`
+	TxBytesPerSec int64  `json:"txBytesPerSec"`
+	RxTotal       int64  `json:"rxTotal"`
+	TxTotal       int64  `json:"txTotal"`
+	RxPackets     int64  `json:"rxPackets"`
+	TxPackets     int64  `json:"txPackets"`
 }
 
 type DiskIOStats struct {

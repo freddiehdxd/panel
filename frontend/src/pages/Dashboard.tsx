@@ -12,15 +12,33 @@ import { api, App } from '@/lib/api';
 
 /* ---- Types ---- */
 
+interface CPUTimes {
+  user: number; nice: number; system: number; idle: number;
+  iowait: number; irq: number; softirq: number; steal: number;
+}
+
+interface LoadInfo {
+  one: number; five: number; fifteen: number;
+  max: number; limit: number; safe: number;
+}
+
+interface NetworkIface {
+  name: string; rxBytesPerSec: number; txBytesPerSec: number;
+  rxTotal: number; txTotal: number; rxPackets: number; txPackets: number;
+}
+
 interface Stats {
-  cpu:       { usage: number; cores: number; model: string; loadAvg: number[]; perCore: number[] };
+  cpu:       { usage: number; cores: number; model: string; loadAvg: number[]; perCore: number[]; times: CPUTimes; load: LoadInfo };
   memory:    { total: number; used: number; free: number; percent: number };
   disk:      { total: number; used: number; percent: number };
-  network:   { rxBytesPerSec: number; txBytesPerSec: number; rxTotal: number; txTotal: number; interface: string };
+  network:   { rxBytesPerSec: number; txBytesPerSec: number; rxTotal: number; txTotal: number; rxPackets: number; txPackets: number; interface: string };
+  networks:  NetworkIface[];
   diskIO:    { readBytesPerSec: number; writeBytesPerSec: number; readTotal: number; writeTotal: number; device: string };
   system:    { uptime: string; hostname: string };
   apps:      { total: number; running: number; stopped: number };
   processes: ProcessInfo[];
+  dbTotal:   number;
+  siteTotal: number;
 }
 
 interface ProcessInfo {
@@ -56,6 +74,13 @@ function speed(bps: number): string {
   if (bps >= 1e6) return (bps / 1e6).toFixed(1) + ' MB/s';
   if (bps >= 1e3) return (bps / 1e3).toFixed(1) + ' KB/s';
   return bps + ' B/s';
+}
+
+function fmtPkts(n: number): string {
+  if (n >= 1e9) return (n / 1e9).toFixed(1) + 'G';
+  if (n >= 1e6) return (n / 1e6).toFixed(1) + 'M';
+  if (n >= 1e3) return (n / 1e3).toFixed(1) + 'K';
+  return String(n);
 }
 
 /* ---- Ring Gauge ---- */
@@ -265,6 +290,115 @@ function TopProcesses({ processes }: { processes: ProcessInfo[] }) {
   );
 }
 
+/* ---- CPU Times Breakdown ---- */
+
+function CPUTimesCard({ times }: { times?: CPUTimes }) {
+  if (!times) return null;
+  const items = [
+    { label: 'User',    value: times.user,    color: '#8b5cf6' },
+    { label: 'System',  value: times.system,  color: '#3b82f6' },
+    { label: 'IOWait',  value: times.iowait,  color: '#f59e0b' },
+    { label: 'Steal',   value: times.steal,   color: '#ef4444' },
+    { label: 'Nice',    value: times.nice,     color: '#06b6d4' },
+    { label: 'IRQ',     value: times.irq,      color: '#ec4899' },
+    { label: 'SoftIRQ', value: times.softirq,  color: '#a855f7' },
+    { label: 'Idle',    value: times.idle,      color: '#374151' },
+  ];
+  return (
+    <div className="card p-4" style={{ background: 'rgba(255,255,255,0.02)' }}>
+      <p className="text-[11px] font-semibold text-gray-600 uppercase tracking-widest mb-3">CPU Time Breakdown</p>
+      <div className="flex h-3 rounded-full overflow-hidden mb-3" style={{ background: 'rgba(255,255,255,0.05)' }}>
+        {items.filter(i => i.value > 0.5).map(i => (
+          <div key={i.label} className="h-full transition-all duration-700" title={`${i.label}: ${i.value}%`}
+            style={{ width: `${i.value}%`, background: i.color }} />
+        ))}
+      </div>
+      <div className="grid grid-cols-4 gap-x-3 gap-y-1.5">
+        {items.map(i => (
+          <div key={i.label} className="flex items-center gap-1.5">
+            <span className="h-2 w-2 rounded-full shrink-0" style={{ background: i.color }} />
+            <span className="text-[10px] text-gray-600">{i.label}</span>
+            <span className="text-[10px] text-gray-400 font-mono ml-auto">{i.value}%</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/* ---- Load Average Gauge ---- */
+
+function LoadGauge({ load }: { load?: LoadInfo }) {
+  if (!load) return null;
+  const current = load.one;
+  const maxVal = load.max || 1;
+  const pct = Math.min((current / maxVal) * 100, 100);
+  const status = current >= load.limit ? 'critical' : current >= load.safe ? 'warning' : 'healthy';
+  const statusColor = status === 'critical' ? '#ef4444' : status === 'warning' ? '#f59e0b' : '#10b981';
+
+  return (
+    <div className="card p-4" style={{ background: 'rgba(255,255,255,0.02)' }}>
+      <div className="flex items-center justify-between mb-3">
+        <p className="text-[11px] font-semibold text-gray-600 uppercase tracking-widest">Load Average</p>
+        <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full"
+          style={{ background: `${statusColor}15`, color: statusColor, border: `1px solid ${statusColor}30` }}>
+          {status}
+        </span>
+      </div>
+      <div className="flex items-baseline gap-2 mb-3">
+        <span className="text-2xl font-bold text-white">{load.one.toFixed(2)}</span>
+        <span className="text-xs text-gray-600">{load.five.toFixed(2)}</span>
+        <span className="text-xs text-gray-700">{load.fifteen.toFixed(2)}</span>
+      </div>
+      <div className="relative h-2.5 rounded-full overflow-hidden" style={{ background: 'rgba(255,255,255,0.05)' }}>
+        <div className="h-full rounded-full transition-all duration-700"
+          style={{ width: `${pct}%`, background: statusColor }} />
+        {/* Threshold markers */}
+        <div className="absolute top-0 h-full w-px bg-amber-500/50"
+          style={{ left: `${(load.safe / maxVal) * 100}%` }} title={`Safe: ${load.safe}`} />
+        <div className="absolute top-0 h-full w-px bg-red-500/50"
+          style={{ left: `${(load.limit / maxVal) * 100}%` }} title={`Limit: ${load.limit}`} />
+      </div>
+      <div className="flex justify-between mt-1.5 text-[9px] text-gray-700">
+        <span>0</span>
+        <span className="text-amber-600">Safe {load.safe}</span>
+        <span className="text-red-600">Limit {load.limit}</span>
+        <span>Max {load.max}</span>
+      </div>
+    </div>
+  );
+}
+
+/* ---- Network Interfaces Table ---- */
+
+function NetworkIfacesCard({ interfaces }: { interfaces?: NetworkIface[] }) {
+  if (!interfaces || interfaces.length === 0) return null;
+  return (
+    <div className="card p-4" style={{ background: 'rgba(255,255,255,0.02)' }}>
+      <p className="text-[11px] font-semibold text-gray-600 uppercase tracking-widest mb-3">Network Interfaces</p>
+      <div className="space-y-1.5">
+        <div className="grid grid-cols-[1fr_70px_70px_60px_60px] gap-2 text-[10px] text-gray-700 uppercase font-semibold tracking-wider px-1">
+          <span>Interface</span>
+          <span className="text-right">RX/s</span>
+          <span className="text-right">TX/s</span>
+          <span className="text-right">RX Pkts</span>
+          <span className="text-right">TX Pkts</span>
+        </div>
+        {interfaces.map(ni => (
+          <div key={ni.name}
+            className="grid grid-cols-[1fr_70px_70px_60px_60px] gap-2 items-center rounded-lg px-2 py-1.5 hover:bg-white/[0.03] transition-colors">
+            <span className="text-xs text-gray-300 font-mono">{ni.name}</span>
+            <span className="text-xs font-mono text-emerald-400 text-right">{speed(ni.rxBytesPerSec)}</span>
+            <span className="text-xs font-mono text-blue-400 text-right">{speed(ni.txBytesPerSec)}</span>
+            <span className="text-[10px] font-mono text-gray-500 text-right">{fmtPkts(ni.rxPackets)}</span>
+            <span className="text-[10px] font-mono text-gray-500 text-right">{fmtPkts(ni.txPackets)}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 /* ---- Dashboard Page ---- */
 
 export default function DashboardPage() {
@@ -403,7 +537,7 @@ export default function DashboardPage() {
             color="#f59e0b" ring={stats.disk.percent} ringColor="#f59e0b" />
           <StatCard title="Apps" icon={Activity}
             value={`${running} online`}
-            sub={`${apps.length - running} stopped · ${apps.length} total`}
+            sub={`${stats.dbTotal || 0} DBs · ${stats.siteTotal || 0} sites · ${apps.length} apps`}
             color="#10b981" />
         </div>
       ) : (
@@ -416,7 +550,7 @@ export default function DashboardPage() {
 
       {/* Per-core CPU + Network I/O + Disk I/O + Top Processes */}
       {stats && (
-        <div className="grid grid-cols-1 lg:grid-cols-4 gap-4 mb-6 animate-slide-up">
+        <div className="grid grid-cols-1 lg:grid-cols-4 gap-4 mb-4 animate-slide-up">
           <CoreBars perCore={stats.cpu.perCore} />
           <IOCard title="Network" icon={Network} color="#06b6d4"
             inLabel="Download" outLabel="Upload"
@@ -429,6 +563,15 @@ export default function DashboardPage() {
             outValue={speed(stats.diskIO.writeBytesPerSec)}
             sparkIn={history?.diskRead} sparkOut={history?.diskWrite} />
           <TopProcesses processes={stats.processes} />
+        </div>
+      )}
+
+      {/* CPU Times + Load Gauge + Network Interfaces */}
+      {stats && (
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 mb-6 animate-slide-up">
+          <CPUTimesCard times={stats.cpu.times} />
+          <LoadGauge load={stats.cpu.load} />
+          <NetworkIfacesCard interfaces={stats.networks} />
         </div>
       )}
 
@@ -563,7 +706,7 @@ export default function DashboardPage() {
             { label: 'CPU Model', value: stats.cpu.model.split('@')[0]?.trim() ?? '---', icon: Cpu },
             { label: 'Load Average', value: stats.cpu.loadAvg.map(v => v.toFixed(2)).join(' / '), icon: Activity },
             { label: 'System Uptime', value: stats.system.uptime, icon: Clock },
-            { label: 'Network', value: `${stats.network.interface} · ${bytes(stats.network.rxTotal)} rx`, icon: Network },
+            { label: 'Network', value: `${stats.network.interface} · ${bytes(stats.network.rxTotal)} rx · ${fmtPkts(stats.network.rxPackets)} pkts`, icon: Network },
           ].map(({ label, value, icon: Icon }) => (
             <div key={label} className="flex items-center gap-3 rounded-xl px-4 py-3"
               style={{ background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.05)' }}>

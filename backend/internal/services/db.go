@@ -112,6 +112,30 @@ func (db *DB) Exec(ctx context.Context, sql string, args ...interface{}) (pgconn
 	return db.Pool.Exec(ctx, sql, args...)
 }
 
+// CountDatabases returns the number of managed databases
+func (db *DB) CountDatabases() int {
+	var count int
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	err := db.Pool.QueryRow(ctx, "SELECT COUNT(*) FROM managed_databases").Scan(&count)
+	if err != nil {
+		return 0
+	}
+	return count
+}
+
+// CountApps returns the number of deployed apps
+func (db *DB) CountApps() int {
+	var count int
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	err := db.Pool.QueryRow(ctx, "SELECT COUNT(*) FROM apps").Scan(&count)
+	if err != nil {
+		return 0
+	}
+	return count
+}
+
 // Close closes the database pool
 func (db *DB) Close() {
 	db.Pool.Close()

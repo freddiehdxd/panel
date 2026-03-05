@@ -31,6 +31,7 @@ const (
 type StatsHandler struct {
 	cfg    *config.Config
 	pm2    *services.PM2
+	db     *services.DB
 	mu     sync.RWMutex
 	cached *models.Stats
 
@@ -38,13 +39,16 @@ type StatsHandler struct {
 	prevCPU     cpuTimes
 	prevPerCore []cpuTimes
 	prevNet     netCounters
+	prevIfaces  []ifaceCounters
 	prevDiskIO  diskIOCounters
 	prevTime    time.Time
 
-	// Slow-poll cached data (processes + PM2 apps, refreshed every 5th tick)
+	// Slow-poll cached data (refreshed every 5th tick)
 	slowTick     int
 	cachedProcs  []models.ProcessStats
 	cachedApps   models.AppsStats
+	cachedDbTotal   int
+	cachedSiteTotal int
 
 	// History ring buffer
 	history   [historySize]historyPoint
@@ -68,9 +72,19 @@ type cpuTimes struct {
 }
 
 type netCounters struct {
-	rxBytes int64
-	txBytes int64
-	iface   string
+	rxBytes   int64
+	txBytes   int64
+	rxPackets int64
+	txPackets int64
+	iface     string
+}
+
+type ifaceCounters struct {
+	name      string
+	rxBytes   int64
+	txBytes   int64
+	rxPackets int64
+	txPackets int64
 }
 
 type diskIOCounters struct {
@@ -90,10 +104,11 @@ type historyPoint struct {
 }
 
 // NewStatsHandler creates a new stats handler and starts background collection
-func NewStatsHandler(pm2 *services.PM2, cfg *config.Config) *StatsHandler {
+func NewStatsHandler(pm2 *services.PM2, cfg *config.Config, db *services.DB) *StatsHandler {
 	h := &StatsHandler{
 		cfg:     cfg,
 		pm2:     pm2,
+		db:      db,
 		clients: make(map[*websocket.Conn]struct{}),
 		upgrader: websocket.Upgrader{
 			CheckOrigin: func(r *http.Request) bool {
@@ -108,6 +123,7 @@ func NewStatsHandler(pm2 *services.PM2, cfg *config.Config) *StatsHandler {
 	h.prevCPU = readCPUTimes()
 	h.prevPerCore = readPerCoreTimes()
 	h.prevNet = readNetCounters()
+	h.prevIfaces = readAllIfaces()
 	h.prevDiskIO = readDiskIOCounters()
 	h.prevTime = time.Now()
 	h.totalMem = readTotalMemory()
@@ -261,20 +277,44 @@ func (h *StatsHandler) doCollect() {
 	// Disk
 	stats.Disk = readDisk()
 
-	// Network I/O
+	// Network I/O (primary interface)
 	currentNet := readNetCounters()
+	rxPS := int64(float64(currentNet.rxBytes-h.prevNet.rxBytes) / elapsed)
+	txPS := int64(float64(currentNet.txBytes-h.prevNet.txBytes) / elapsed)
+	if rxPS < 0 { rxPS = 0 }
+	if txPS < 0 { txPS = 0 }
 	stats.Network = models.NetworkStats{
-		RxBytesPerSec: int64(float64(currentNet.rxBytes-h.prevNet.rxBytes) / elapsed),
-		TxBytesPerSec: int64(float64(currentNet.txBytes-h.prevNet.txBytes) / elapsed),
+		RxBytesPerSec: rxPS,
+		TxBytesPerSec: txPS,
 		RxTotal:       currentNet.rxBytes,
 		TxTotal:       currentNet.txBytes,
+		RxPackets:     currentNet.rxPackets,
+		TxPackets:     currentNet.txPackets,
 		Interface:     currentNet.iface,
 	}
-	if stats.Network.RxBytesPerSec < 0 {
-		stats.Network.RxBytesPerSec = 0
+
+	// All network interfaces
+	currentIfaces := readAllIfaces()
+	prevIfaceMap := make(map[string]ifaceCounters)
+	for _, pi := range h.prevIfaces {
+		prevIfaceMap[pi.name] = pi
 	}
-	if stats.Network.TxBytesPerSec < 0 {
-		stats.Network.TxBytesPerSec = 0
+	stats.Networks = make([]models.NetworkInterface, 0, len(currentIfaces))
+	for _, ci := range currentIfaces {
+		ni := models.NetworkInterface{
+			Name:      ci.name,
+			RxTotal:   ci.rxBytes,
+			TxTotal:   ci.txBytes,
+			RxPackets: ci.rxPackets,
+			TxPackets: ci.txPackets,
+		}
+		if pi, ok := prevIfaceMap[ci.name]; ok {
+			ni.RxBytesPerSec = int64(float64(ci.rxBytes-pi.rxBytes) / elapsed)
+			ni.TxBytesPerSec = int64(float64(ci.txBytes-pi.txBytes) / elapsed)
+			if ni.RxBytesPerSec < 0 { ni.RxBytesPerSec = 0 }
+			if ni.TxBytesPerSec < 0 { ni.TxBytesPerSec = 0 }
+		}
+		stats.Networks = append(stats.Networks, ni)
 	}
 
 	// Disk I/O
@@ -343,11 +383,19 @@ func (h *StatsHandler) doCollect() {
 			}
 			h.cachedProcs = procs
 		}
+
+		// DB and site totals (single COUNT query — fast)
+		if h.db != nil {
+			h.cachedDbTotal = h.db.CountDatabases()
+			h.cachedSiteTotal = h.db.CountApps()
+		}
 	}
 
 	// Use cached slow data
 	stats.Processes = h.cachedProcs
 	stats.Apps = h.cachedApps
+	stats.DbTotal = h.cachedDbTotal
+	stats.SiteTotal = h.cachedSiteTotal
 	if stats.Apps.List == nil {
 		stats.Apps.List = []interface{}{}
 	}
@@ -356,6 +404,7 @@ func (h *StatsHandler) doCollect() {
 	h.prevCPU = currentCPU
 	h.prevPerCore = currentPerCore
 	h.prevNet = currentNet
+	h.prevIfaces = currentIfaces
 	h.prevDiskIO = currentDiskIO
 	h.prevTime = now
 
@@ -453,15 +502,57 @@ func (h *StatsHandler) pingClients() {
 // ---- CPU ----
 
 func (h *StatsHandler) calculateCPU(current cpuTimes) models.CPUStats {
-	usage := calcCPUPercent(h.prevCPU, current)
+	prev := h.prevCPU
+	usage := calcCPUPercent(prev, current)
 	model := readCPUModel()
 	loadAvg := readLoadAvg()
+	cores := runtime.NumCPU()
+
+	// CPU times breakdown (percentages over the delta period)
+	times := calcCPUTimesPercent(prev, current)
+
+	// Load thresholds like aaPanel
+	load := models.LoadInfo{
+		One:     loadAvg[0],
+		Five:    loadAvg[1],
+		Fifteen: loadAvg[2],
+		Max:     cores * 2,
+		Limit:   cores,
+		Safe:    int(float64(cores) * 0.75),
+	}
+	if load.Safe < 1 {
+		load.Safe = 1
+	}
 
 	return models.CPUStats{
 		Usage:   round2(usage),
-		Cores:   runtime.NumCPU(),
+		Cores:   cores,
 		Model:   model,
 		LoadAvg: loadAvg,
+		Times:   times,
+		Load:    load,
+	}
+}
+
+func calcCPUTimesPercent(prev, curr cpuTimes) models.CPUTimes {
+	prevTotal := prev.user + prev.nice + prev.system + prev.idle +
+		prev.iowait + prev.irq + prev.softirq + prev.steal
+	currTotal := curr.user + curr.nice + curr.system + curr.idle +
+		curr.iowait + curr.irq + curr.softirq + curr.steal
+	delta := float64(currTotal - prevTotal)
+	if delta <= 0 {
+		return models.CPUTimes{Idle: 100}
+	}
+
+	return models.CPUTimes{
+		User:    round2(float64(curr.user-prev.user) / delta * 100),
+		Nice:    round2(float64(curr.nice-prev.nice) / delta * 100),
+		System:  round2(float64(curr.system-prev.system) / delta * 100),
+		Idle:    round2(float64(curr.idle-prev.idle) / delta * 100),
+		IOWait:  round2(float64(curr.iowait-prev.iowait) / delta * 100),
+		IRQ:     round2(float64(curr.irq-prev.irq) / delta * 100),
+		SoftIRQ: round2(float64(curr.softirq-prev.softirq) / delta * 100),
+		Steal:   round2(float64(curr.steal-prev.steal) / delta * 100),
 	}
 }
 
@@ -692,16 +783,67 @@ func readNetCounters() netCounters {
 		}
 
 		rx, _ := strconv.ParseInt(fields[0], 10, 64)
+		rxPkts, _ := strconv.ParseInt(fields[1], 10, 64)
 		tx, _ := strconv.ParseInt(fields[8], 10, 64)
+		txPkts, _ := strconv.ParseInt(fields[9], 10, 64)
 
 		// Pick the interface with the most traffic
 		if rx > bestRx {
 			bestRx = rx
-			best = netCounters{rxBytes: rx, txBytes: tx, iface: iface}
+			best = netCounters{
+				rxBytes:   rx,
+				txBytes:   tx,
+				rxPackets: rxPkts,
+				txPackets: txPkts,
+				iface:     iface,
+			}
 		}
 	}
 
 	return best
+}
+
+// readAllIfaces reads /proc/net/dev and returns counters for all non-loopback interfaces
+func readAllIfaces() []ifaceCounters {
+	f, err := os.Open("/proc/net/dev")
+	if err != nil {
+		return nil
+	}
+	defer f.Close()
+
+	var result []ifaceCounters
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := scanner.Text()
+		parts := strings.SplitN(line, ":", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		iface := strings.TrimSpace(parts[0])
+		if iface == "lo" {
+			continue
+		}
+
+		fields := strings.Fields(parts[1])
+		if len(fields) < 10 {
+			continue
+		}
+
+		rxBytes, _ := strconv.ParseInt(fields[0], 10, 64)
+		rxPkts, _ := strconv.ParseInt(fields[1], 10, 64)
+		txBytes, _ := strconv.ParseInt(fields[8], 10, 64)
+		txPkts, _ := strconv.ParseInt(fields[9], 10, 64)
+
+		result = append(result, ifaceCounters{
+			name:      iface,
+			rxBytes:   rxBytes,
+			txBytes:   txBytes,
+			rxPackets: rxPkts,
+			txPackets: txPkts,
+		})
+	}
+
+	return result
 }
 
 // ---- Disk I/O ----

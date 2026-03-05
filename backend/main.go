@@ -56,7 +56,7 @@ func main() {
 	redisHandler := handlers.NewRedisHandler(exec)
 	filesHandler := handlers.NewFilesHandler(cfg)
 	logsHandler := handlers.NewLogsHandler(pm2, exec)
-	statsHandler := handlers.NewStatsHandler(pm2, cfg)
+	statsHandler := handlers.NewStatsHandler(pm2, cfg, db)
 
 	// Create router
 	r := chi.NewRouter()
