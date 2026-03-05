@@ -1,19 +1,18 @@
 const BASE = '/api';
 
-function getToken(): string | null {
-  if (typeof window === 'undefined') return null;
-  return localStorage.getItem('panel_token');
-}
-
-export function setToken(t: string): void {
-  localStorage.setItem('panel_token', t);
-  // Also set as cookie so Next.js middleware can read it server-side
-  document.cookie = `panel_token=${t}; path=/; max-age=${12 * 60 * 60}; SameSite=Lax`;
-}
+/**
+ * Auth is now handled via HttpOnly cookies set by the backend.
+ * The browser sends the cookie automatically with every request.
+ * No token is stored in localStorage or JS-accessible cookies.
+ */
 
 export function clearToken(): void {
-  localStorage.removeItem('panel_token');
-  document.cookie = 'panel_token=; path=/; max-age=0';
+  // Clear any legacy localStorage token
+  if (typeof window !== 'undefined') {
+    localStorage.removeItem('panel_token');
+    // Clear legacy JS cookie
+    document.cookie = 'panel_token=; path=/; max-age=0';
+  }
 }
 
 async function req<T>(
@@ -21,19 +20,17 @@ async function req<T>(
   path: string,
   body?: unknown
 ): Promise<{ success: boolean; data?: T; error?: string }> {
-  const token = getToken();
-
   try {
     const res = await fetch(`${BASE}${path}`, {
       method,
+      credentials: 'same-origin', // Send HttpOnly cookies automatically
       headers: {
         'Content-Type': 'application/json',
-        ...(token ? { Authorization: `Bearer ${token}` } : {}),
       },
       body: body !== undefined ? JSON.stringify(body) : undefined,
     });
 
-    // 401 interceptor — clear token and redirect to login
+    // 401 interceptor — session expired, redirect to login
     if (res.status === 401 && !path.startsWith('/auth/')) {
       clearToken();
       if (typeof window !== 'undefined') {

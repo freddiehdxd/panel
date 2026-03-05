@@ -4,11 +4,13 @@ import express from 'express';
 import helmet from 'helmet';
 import cors from 'cors';
 import compression from 'compression';
+import cookieParser from 'cookie-parser';
 import rateLimit from 'express-rate-limit';
 
 import { initDb, pool } from './services/db';
 import { logger } from './services/logger';
 import { authMiddleware } from './middleware/auth';
+import { auditMiddleware } from './middleware/audit';
 
 import authRouter      from './routes/auth';
 import appsRouter      from './routes/apps';
@@ -37,21 +39,42 @@ if (!process.env.DATABASE_URL) {
   process.exit(1);
 }
 
+// ─── Trust proxy (NGINX in front) ─────────────────────────────────────────────
+app.set('trust proxy', 'loopback');
+
 // ─── Security middleware ──────────────────────────────────────────────────────
 app.use(helmet());
 app.use(compression());
-app.use(cors({ origin: process.env.PANEL_ORIGIN ?? 'http://localhost:3000' }));
+app.use(cookieParser());
+app.use(cors({
+  origin: process.env.PANEL_ORIGIN ?? 'http://localhost:3000',
+  credentials: true, // Allow cookies to be sent cross-origin
+}));
 app.use(express.json({ limit: '10mb' }));
 
-// Rate limits
-app.use('/api/auth', rateLimit({ windowMs: 15 * 60 * 1000, max: 10, standardHeaders: true, legacyHeaders: false }));
-app.use('/api', rateLimit({ windowMs: 60 * 1000, max: 300, standardHeaders: true, legacyHeaders: false }));
+// Rate limits — tighter on auth, reasonable on API
+app.use('/api/auth/login', rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { success: false, error: 'Too many login attempts. Try again later.' },
+}));
+app.use('/api', rateLimit({
+  windowMs: 60 * 1000,
+  max: 300,
+  standardHeaders: true,
+  legacyHeaders: false,
+}));
 
 // ─── Routes ──────────────────────────────────────────────────────────────────
 app.use('/api/auth', authRouter);
 
 // All routes below require a valid JWT
 app.use('/api', authMiddleware);
+
+// Audit logging for all state-changing operations
+app.use('/api', auditMiddleware);
 
 app.use('/api/apps',      appsRouter);
 app.use('/api/domains',   domainsRouter);

@@ -22,10 +22,10 @@ export function middleware(request: NextRequest) {
     return NextResponse.next();
   }
 
-  // Check for auth token in cookie (set by client) or authorization header
-  const token =
-    request.cookies.get('panel_token')?.value ??
-    request.headers.get('authorization')?.replace('Bearer ', '');
+  // Check for auth token in HttpOnly cookie
+  // The backend sets this as HttpOnly, but Next.js middleware CAN read it
+  // (it runs server-side, not in the browser)
+  const token = request.cookies.get('panel_token')?.value;
 
   // No token — redirect to login
   if (!token) {

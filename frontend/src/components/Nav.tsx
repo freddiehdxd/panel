@@ -44,7 +44,12 @@ export default function Nav() {
     l.label.toLowerCase().includes(search.toLowerCase())
   );
 
-  function logout() { clearToken(); router.push('/login'); }
+  async function logout() {
+    // Call backend to clear HttpOnly cookie, then clear any legacy client-side tokens
+    try { await fetch('/api/auth/logout', { method: 'POST', credentials: 'same-origin' }); } catch { /* best effort */ }
+    clearToken();
+    router.push('/login');
+  }
   function navigate(href: string) { setShowSearch(false); setSearch(''); router.push(href); }
 
   return (

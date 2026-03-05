@@ -2,7 +2,7 @@
 import { useState, FormEvent } from 'react';
 import { useRouter } from 'next/navigation';
 import { Server, Lock, User, ArrowRight, Eye, EyeOff } from 'lucide-react';
-import { api, setToken } from '@/lib/api';
+import { api } from '@/lib/api';
 
 export default function LoginPage() {
   const router  = useRouter();
@@ -16,8 +16,8 @@ export default function LoginPage() {
     setLoading(true); setError('');
     const res = await api.post<{ token: string }>('/auth/login', creds);
     setLoading(false);
-    if (res.success && res.data?.token) {
-      setToken(res.data.token);
+    if (res.success) {
+      // Token is set as HttpOnly cookie by the backend — just redirect
       router.replace('/dashboard');
     } else {
       setError(res.error ?? 'Invalid credentials');
@@ -58,7 +58,7 @@ export default function LoginPage() {
                 <User size={15} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-gray-600 pointer-events-none" />
                 <input
                   className="input pl-10"
-                  placeholder="admin"
+                  placeholder="Enter username"
                   value={creds.username}
                   onChange={(e) => setCreds({ ...creds, username: e.target.value })}
                   autoFocus
@@ -75,7 +75,7 @@ export default function LoginPage() {
                 <input
                   type={showPw ? 'text' : 'password'}
                   className="input pl-10 pr-10"
-                  placeholder="••••••••"
+                  placeholder="Enter password"
                   value={creds.password}
                   onChange={(e) => setCreds({ ...creds, password: e.target.value })}
                   autoComplete="current-password"
@@ -106,7 +106,7 @@ export default function LoginPage() {
               {loading ? (
                 <span className="flex items-center gap-2">
                   <span className="h-3.5 w-3.5 rounded-full border-2 border-white/30 border-t-white animate-spin" />
-                  Signing in…
+                  Signing in...
                 </span>
               ) : (
                 <span className="flex items-center gap-2">

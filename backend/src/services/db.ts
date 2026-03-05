@@ -52,5 +52,23 @@ export async function initDb(): Promise<void> {
     )
   `);
 
+  // Audit log table — tracks all state-changing operations
+  await query(`
+    CREATE TABLE IF NOT EXISTS audit_log (
+      id          BIGSERIAL PRIMARY KEY,
+      username    TEXT NOT NULL,
+      ip          TEXT NOT NULL,
+      method      TEXT NOT NULL,
+      path        TEXT NOT NULL,
+      status_code INTEGER NOT NULL DEFAULT 0,
+      duration_ms INTEGER NOT NULL DEFAULT 0,
+      body        JSONB DEFAULT '{}',
+      created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `);
+
+  // Auto-cleanup: delete audit entries older than 90 days (run once at startup)
+  await query(`DELETE FROM audit_log WHERE created_at < NOW() - INTERVAL '90 days'`);
+
   logger.info('Database schema initialised');
 }
