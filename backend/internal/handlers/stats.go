@@ -44,7 +44,7 @@ type StatsHandler struct {
 	prevDiskIO  diskIOCounters
 	prevTime    time.Time
 
-	// Slow-poll cached data (processes + PM2 apps, refreshed every 10s)
+	// Slow-poll cached data (processes + PM2 apps, refreshed every 5th tick)
 	slowTick     int
 	cachedProcs  []models.ProcessStats
 	cachedApps   models.AppsStats
@@ -61,6 +61,9 @@ type StatsHandler struct {
 
 	// Total memory for process % calculation
 	totalMem int64
+
+	// Active watchers — only collect when someone is watching
+	lastHTTPPoll  time.Time
 }
 
 type cpuTimes struct {
@@ -120,6 +123,11 @@ func NewStatsHandler(pm2 *services.PM2, cfg *config.Config) *StatsHandler {
 
 // Get handles GET /api/stats (HTTP polling fallback)
 func (h *StatsHandler) Get(w http.ResponseWriter, r *http.Request) {
+	// Mark that someone is polling via HTTP
+	h.mu.Lock()
+	h.lastHTTPPoll = time.Now()
+	h.mu.Unlock()
+
 	h.mu.RLock()
 	stats := h.cached
 	h.mu.RUnlock()
@@ -130,6 +138,23 @@ func (h *StatsHandler) Get(w http.ResponseWriter, r *http.Request) {
 	}
 
 	Success(w, stats)
+}
+
+// hasWatchers returns true if any WebSocket clients are connected or HTTP was polled recently
+func (h *StatsHandler) hasWatchers() bool {
+	h.clientsMu.Lock()
+	wsCount := len(h.clients)
+	h.clientsMu.Unlock()
+
+	if wsCount > 0 {
+		return true
+	}
+
+	h.mu.RLock()
+	httpRecent := time.Since(h.lastHTTPPoll) < 30*time.Second
+	h.mu.RUnlock()
+
+	return httpRecent
 }
 
 // WebSocket handles GET /api/stats/ws — pushes live stats every 2s
@@ -189,7 +214,7 @@ func (h *StatsHandler) WebSocket(w http.ResponseWriter, r *http.Request) {
 	}()
 }
 
-// collect runs every 2 seconds to gather system stats
+// collect runs every 2 seconds to gather system stats (only when someone is watching)
 func (h *StatsHandler) collect() {
 	// Small initial delay
 	time.Sleep(500 * time.Millisecond)
@@ -204,8 +229,10 @@ func (h *StatsHandler) collect() {
 	for {
 		select {
 		case <-ticker.C:
-			h.doCollect()
-			h.broadcast()
+			if h.hasWatchers() {
+				h.doCollect()
+				h.broadcast()
+			}
 		case <-pingTicker.C:
 			h.pingClients()
 		}
@@ -280,8 +307,8 @@ func (h *StatsHandler) doCollect() {
 		// Top processes (iterates all /proc/[pid]/)
 		h.cachedProcs = readTopProcesses(h.totalMem)
 
-		// PM2 list (spawns pm2 jlist subprocess)
-		pm2List, err := h.pm2.List()
+		// PM2 list (reads ~/.pm2/ files directly — no subprocess)
+		pm2List, err := h.pm2.ListFromProc()
 		if err == nil {
 			running := 0
 			stopped := 0
