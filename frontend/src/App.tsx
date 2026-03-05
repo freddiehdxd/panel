@@ -11,6 +11,7 @@ import Databases from '@/pages/Databases';
 import Redis from '@/pages/Redis';
 import Files from '@/pages/Files';
 import Logs from '@/pages/Logs';
+import Settings from '@/pages/Settings';
 import NotFound from '@/pages/NotFound';
 
 // ── Auth Context ────────────────────────────────────────────────────────────
@@ -109,6 +110,7 @@ export default function App() {
         <Route path="/redis" element={<ProtectedRoute><Redis /></ProtectedRoute>} />
         <Route path="/files" element={<ProtectedRoute><Files /></ProtectedRoute>} />
         <Route path="/logs" element={<ProtectedRoute><Logs /></ProtectedRoute>} />
+        <Route path="/settings" element={<ProtectedRoute><Settings /></ProtectedRoute>} />
         <Route path="*" element={<NotFound />} />
       </Routes>
     </AuthProvider>

@@ -57,6 +57,7 @@ func main() {
 	filesHandler := handlers.NewFilesHandler(cfg)
 	logsHandler := handlers.NewLogsHandler(pm2, exec)
 	statsHandler := handlers.NewStatsHandler(pm2, cfg, db)
+	updateHandler := handlers.NewUpdateHandler(cfg)
 
 	// Create router
 	r := chi.NewRouter()
@@ -138,6 +139,11 @@ func main() {
 
 		// Stats
 		r.Get("/stats", statsHandler.Get)
+
+		// Panel Update
+		r.Get("/update/check", updateHandler.Check)
+		r.Post("/update/apply", updateHandler.Apply)
+		r.Get("/update/log", updateHandler.Log)
 	})
 
 	// Server setup
