@@ -112,6 +112,7 @@ func main() {
 			r.Get("/apps/{name}", appsHandler.Get)
 			r.Post("/apps/{name}/action", appsHandler.Action)
 			r.Put("/apps/{name}/env", appsHandler.UpdateEnv)
+			r.Post("/apps/{name}/upload-project", appsHandler.UploadProject)
 
 			// Domains
 			r.Post("/domains", domainsHandler.Add)

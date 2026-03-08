@@ -2,7 +2,7 @@ import { useEffect, useState, useCallback } from 'react';
 import {
   Plus, RotateCcw, ExternalLink, ChevronDown, ChevronUp,
   Github, Globe, Upload, Play, Square, Trash2, Zap,
-  GitBranch, Server, MoreHorizontal,
+  GitBranch, Server, MoreHorizontal, FolderArchive, Check,
 } from 'lucide-react';
 import Shell from '@/components/Shell';
 import Modal from '@/components/Modal';
@@ -78,6 +78,37 @@ export default function AppsPage() {
     await api.post(`/apps/${name}/action`, { action });
     await fetchApps();
     setActing(null);
+  }
+
+  // Project zip upload
+  const [uploading, setUploading] = useState<string | null>(null);
+  const [uploadMsg, setUploadMsg] = useState<{ name: string; text: string } | null>(null);
+  const uploadRef = useCallback((node: HTMLInputElement | null) => {
+    if (node) node.value = '';
+  }, []);
+
+  async function uploadProject(name: string, file: File) {
+    setUploading(name);
+    setUploadMsg(null);
+    try {
+      const fd = new FormData();
+      fd.append('file', file);
+      const res = await fetch(`/api/apps/${name}/upload-project`, {
+        method: 'POST',
+        credentials: 'same-origin',
+        body: fd,
+      });
+      const data = await res.json();
+      if (data.success) {
+        setUploadMsg({ name, text: `Uploaded and extracted ${data.data?.files ?? ''} files` });
+      } else {
+        setUploadMsg({ name, text: data.error || 'Upload failed' });
+      }
+    } catch {
+      setUploadMsg({ name, text: 'Upload failed' });
+    } finally {
+      setUploading(null);
+    }
   }
 
   const running = apps.filter((a) => a.status === 'online').length;
@@ -180,7 +211,7 @@ export default function AppsPage() {
                   >
                     {app.status === 'online' ? <Square size={14} /> : <Play size={14} />}
                   </button>
-                  {app.repo_url && (
+                  {app.repo_url ? (
                     <button
                       onClick={() => doAction(app.name, 'rebuild')}
                       disabled={!!acting}
@@ -189,6 +220,25 @@ export default function AppsPage() {
                     >
                       <Zap size={14} />
                     </button>
+                  ) : (
+                    <label
+                      title="Upload project zip"
+                      className={`p-2 rounded-xl text-gray-600 hover:text-amber-400 hover:bg-amber-500/10 transition-all cursor-pointer ${uploading === app.name ? 'pointer-events-none' : ''}`}
+                    >
+                      {uploading === app.name
+                        ? <span className="h-3.5 w-3.5 rounded-full border-2 border-amber-400/30 border-t-amber-400 animate-spin block" />
+                        : <FolderArchive size={14} />}
+                      <input
+                        type="file"
+                        accept=".zip"
+                        className="hidden"
+                        ref={uploadRef}
+                        onChange={(e) => {
+                          const f = e.target.files?.[0];
+                          if (f) uploadProject(app.name, f);
+                        }}
+                      />
+                    </label>
                   )}
                   <button
                     onClick={() => setExpanded(expanded === app.id ? null : app.id)}
@@ -210,6 +260,24 @@ export default function AppsPage() {
                     }} />
                   </div>
                   <span className="text-[10px] text-gray-600 w-8 text-right">{app.cpu}%</span>
+                </div>
+              )}
+
+              {/* Upload result message */}
+              {uploadMsg?.name === app.name && (
+                <div className="mt-3 flex items-center gap-2 rounded-xl px-3 py-2 text-xs animate-slide-up"
+                  style={{
+                    background: uploadMsg.text.startsWith('Upload') && !uploadMsg.text.includes('failed')
+                      ? 'rgba(16,185,129,0.08)' : 'rgba(239,68,68,0.08)',
+                    border: `1px solid ${uploadMsg.text.startsWith('Upload') && !uploadMsg.text.includes('failed')
+                      ? 'rgba(16,185,129,0.2)' : 'rgba(239,68,68,0.2)'}`,
+                  }}>
+                  {uploadMsg.text.startsWith('Upload') && !uploadMsg.text.includes('failed')
+                    ? <Check size={13} className="text-emerald-400 shrink-0" />
+                    : <FolderArchive size={13} className="text-red-400 shrink-0" />}
+                  <span className={uploadMsg.text.startsWith('Upload') && !uploadMsg.text.includes('failed')
+                    ? 'text-emerald-400' : 'text-red-400'}>{uploadMsg.text}</span>
+                  <button onClick={() => setUploadMsg(null)} className="ml-auto text-gray-600 hover:text-gray-400">x</button>
                 </div>
               )}
 
@@ -315,11 +383,15 @@ export default function AppsPage() {
 
             {/* Empty deploy info */}
             {deployType === 'empty' && (
-              <div className="rounded-xl border border-amber-500/15 bg-amber-500/5 p-4 text-sm space-y-1">
+              <div className="rounded-xl border border-amber-500/15 bg-amber-500/5 p-4 text-sm space-y-2">
                 <p className="text-amber-300 font-semibold text-xs uppercase tracking-wider mb-2">Manual Deployment</p>
                 <p className="text-gray-400">An empty directory will be created at:</p>
                 <code className="block text-xs text-gray-300 font-mono">/var/www/apps/{form.name || '<name>'}</code>
-                <p className="text-gray-500 text-xs mt-2">Upload your built Next.js files via File Manager, then start the app.</p>
+                <p className="text-gray-500 text-xs mt-2">
+                  After creating the app, you can upload a project .zip file using the
+                  <FolderArchive size={12} className="inline mx-1 text-amber-400" />
+                  button on the app card, or use the File Manager.
+                </p>
               </div>
             )}
 

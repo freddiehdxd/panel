@@ -38,6 +38,7 @@ var allowedBins = map[string]string{
 	"psql":       "/usr/bin/psql",
 	"pg_dump":    "/usr/bin/pg_dump",
 	"pg_restore": "/usr/bin/pg_restore",
+	"unzip":      "/usr/bin/unzip",
 	"tail":       "/usr/bin/tail",
 	"redis-cli": "/usr/bin/redis-cli",
 }

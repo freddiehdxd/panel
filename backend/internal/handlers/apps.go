@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -342,6 +343,102 @@ func (h *AppsHandler) getAppByName(ctx context.Context, name string) (*models.Ap
 		app.EnvVars = make(map[string]string)
 	}
 	return &app, nil
+}
+
+// UploadProject handles POST /api/apps/:name/upload-project
+// Accepts a zip file upload, extracts it into the app directory (replacing existing files)
+func (h *AppsHandler) UploadProject(w http.ResponseWriter, r *http.Request) {
+	name := chi.URLParam(r, "name")
+
+	if !services.ValidateAppName(name) {
+		Error(w, http.StatusBadRequest, "Invalid app name")
+		return
+	}
+
+	ctx := r.Context()
+
+	// Verify app exists
+	_, err := h.getAppByName(ctx, name)
+	if err != nil {
+		Error(w, http.StatusNotFound, "App not found")
+		return
+	}
+
+	// Parse multipart form (500MB max for project zips)
+	if err := r.ParseMultipartForm(500 << 20); err != nil {
+		Error(w, http.StatusBadRequest, "File too large or invalid upload (max 500MB)")
+		return
+	}
+
+	file, header, err := r.FormFile("file")
+	if err != nil {
+		Error(w, http.StatusBadRequest, "No file provided")
+		return
+	}
+	defer file.Close()
+
+	// Validate file extension
+	ext := strings.ToLower(filepath.Ext(header.Filename))
+	if ext != ".zip" {
+		Error(w, http.StatusBadRequest, "Only .zip files are supported")
+		return
+	}
+
+	appDir := filepath.Join(h.cfg.AppsDir, name)
+
+	// Save uploaded zip to a temp file inside the app dir
+	tmpFile, err := os.CreateTemp(appDir, "upload-*.zip")
+	if err != nil {
+		// App dir might not exist yet
+		if err := os.MkdirAll(appDir, 0755); err != nil {
+			Error(w, http.StatusInternalServerError, "Failed to create app directory")
+			return
+		}
+		tmpFile, err = os.CreateTemp(appDir, "upload-*.zip")
+		if err != nil {
+			Error(w, http.StatusInternalServerError, "Failed to create temp file")
+			return
+		}
+	}
+	tmpPath := tmpFile.Name()
+	defer os.Remove(tmpPath) // Clean up temp zip after extraction
+
+	if _, err := io.Copy(tmpFile, file); err != nil {
+		tmpFile.Close()
+		Error(w, http.StatusInternalServerError, "Failed to save uploaded file")
+		return
+	}
+	tmpFile.Close()
+
+	// Extract zip into app directory using unzip -o (overwrite)
+	result, err := h.exec.RunBin("unzip", "-o", tmpPath, "-d", appDir)
+	if err != nil {
+		Error(w, http.StatusInternalServerError, fmt.Sprintf("Extraction failed: %v", err))
+		return
+	}
+	if result.Code != 0 {
+		errMsg := result.Stderr
+		if len(errMsg) > 300 {
+			errMsg = errMsg[:300] + "..."
+		}
+		Error(w, http.StatusInternalServerError, fmt.Sprintf("Extraction failed: %s", errMsg))
+		return
+	}
+
+	// Count extracted files from stdout (unzip lists files it extracts)
+	extractedLines := strings.Split(strings.TrimSpace(result.Stdout), "\n")
+	fileCount := 0
+	for _, line := range extractedLines {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "inflating:") || strings.HasPrefix(line, "extracting:") || strings.HasPrefix(line, "creating:") {
+			fileCount++
+		}
+	}
+
+	Success(w, map[string]interface{}{
+		"message": fmt.Sprintf("Project uploaded and extracted to /var/www/apps/%s", name),
+		"files":   fileCount,
+	})
 }
 
 // sanitizeDeployError strips internal paths and limits error message length for client responses
