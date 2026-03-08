@@ -317,7 +317,9 @@ export default function DatabasesPage() {
       });
       const data = await res.json();
       if (data.success) {
-        setRestoreSuccess(data.data?.message || 'Database restored successfully');
+        const msg = data.data?.message || 'Database restored successfully';
+        const warnings = data.data?.warnings;
+        setRestoreSuccess(warnings ? `${msg}\n\nWarnings:\n${warnings}` : msg);
         setRestoreTarget(null);
         await fetchStats();
       } else {
@@ -611,7 +613,7 @@ export default function DatabasesPage() {
               style={{ background: 'rgba(16,185,129,0.1)', border: '1px solid rgba(16,185,129,0.2)' }}>
               <Upload size={15} className="text-emerald-400" />
             </div>
-            <p className="text-emerald-400 font-semibold text-sm flex-1">{restoreSuccess}</p>
+            <pre className="text-emerald-400 font-semibold text-sm flex-1 whitespace-pre-wrap font-sans">{restoreSuccess}</pre>
             <button onClick={() => setRestoreSuccess('')} className="btn-ghost text-xs">Dismiss</button>
           </div>
         </div>
@@ -647,7 +649,10 @@ export default function DatabasesPage() {
               </div>
             )}
             {restoreError && (
-              <div className="rounded-xl border border-red-500/20 bg-red-500/8 px-4 py-3 text-sm text-red-400">{restoreError}</div>
+              <div className="rounded-xl border border-red-500/20 bg-red-500/8 px-4 py-3 text-sm text-red-400">
+                <p className="font-semibold mb-1">Restore failed</p>
+                <pre className="whitespace-pre-wrap text-xs text-red-400/80 font-mono max-h-48 overflow-auto">{restoreError}</pre>
+              </div>
             )}
             <div className="flex gap-3 justify-end">
               <button className="btn-ghost" onClick={() => { setRestoreTarget(null); setRestoreError(''); }}>Cancel</button>

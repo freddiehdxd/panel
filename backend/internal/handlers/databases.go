@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"math"
 	"net/http"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -361,12 +363,19 @@ func (h *DatabasesHandler) Restore(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	file, _, err := r.FormFile("file")
+	file, header, err := r.FormFile("file")
 	if err != nil {
 		Error(w, http.StatusBadRequest, "No file provided")
 		return
 	}
 	defer file.Close()
+
+	// Validate file extension
+	ext := strings.ToLower(filepath.Ext(header.Filename))
+	if ext != ".sql" && ext != ".dump" && ext != ".bak" {
+		Error(w, http.StatusBadRequest, "Only .sql, .dump, and .bak files are supported")
+		return
+	}
 
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
@@ -381,25 +390,97 @@ func (h *DatabasesHandler) Restore(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Build connection URI for psql
+	// Use ON_ERROR_STOP=1 so psql exits non-zero on the first real error
 	connURI := fmt.Sprintf("postgresql://%s:%s@%s:5432/%s", dbUser, password, h.cfg.DBHost, name)
 
 	// Pipe the uploaded file into psql to restore
-	result, err := h.exec.RunBinWithStdin(file, "psql", connURI)
+	result, err := h.exec.RunBinWithStdin(file, "psql", "-v", "ON_ERROR_STOP=1", connURI)
 	if err != nil {
 		Error(w, http.StatusInternalServerError, fmt.Sprintf("Restore failed: %v", err))
 		return
 	}
 
+	// Collect error details from both stderr and stdout
+	// psql writes errors to stderr but notices/warnings can appear in either stream
+	errOutput := strings.TrimSpace(result.Stderr)
+	if errOutput == "" {
+		errOutput = strings.TrimSpace(result.Stdout)
+	}
+
 	if result.Code != 0 {
-		errMsg := result.Stderr
-		if len(errMsg) > 500 {
-			errMsg = errMsg[:500] + "..."
+		// Extract the most useful error lines from the output
+		errMsg := extractPsqlErrors(errOutput)
+		if errMsg == "" {
+			errMsg = fmt.Sprintf("psql exited with code %d. Check that the SQL file is valid and compatible with this database.", result.Code)
 		}
-		Error(w, http.StatusInternalServerError, fmt.Sprintf("Restore completed with errors: %s", errMsg))
+		Error(w, http.StatusInternalServerError, errMsg)
+		return
+	}
+
+	// Even with exit code 0, check stderr for warnings (non-fatal)
+	if errOutput != "" && containsPsqlErrors(errOutput) {
+		warnMsg := extractPsqlErrors(errOutput)
+		Success(w, map[string]string{
+			"message":  "Database " + name + " restored with warnings",
+			"warnings": warnMsg,
+		})
 		return
 	}
 
 	Success(w, map[string]string{"message": "Database " + name + " restored successfully"})
+}
+
+// extractPsqlErrors extracts meaningful error lines from psql output
+func extractPsqlErrors(output string) string {
+	if output == "" {
+		return ""
+	}
+
+	lines := strings.Split(output, "\n")
+	var errors []string
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		// Pick up ERROR, FATAL, and useful context lines
+		lower := strings.ToLower(line)
+		if strings.Contains(lower, "error") ||
+			strings.Contains(lower, "fatal") ||
+			strings.Contains(lower, "could not") ||
+			strings.Contains(lower, "permission denied") ||
+			strings.Contains(lower, "does not exist") ||
+			strings.Contains(lower, "already exists") ||
+			strings.Contains(lower, "syntax error") ||
+			strings.Contains(lower, "no such file") ||
+			strings.Contains(lower, "connection refused") ||
+			strings.Contains(lower, "password authentication failed") {
+			errors = append(errors, line)
+		}
+	}
+
+	if len(errors) == 0 {
+		// Return the last few lines as fallback
+		start := len(lines) - 5
+		if start < 0 {
+			start = 0
+		}
+		return strings.Join(lines[start:], "\n")
+	}
+
+	// Limit to 10 error lines
+	if len(errors) > 10 {
+		errors = append(errors[:10], fmt.Sprintf("... and %d more errors", len(errors)-10))
+	}
+	return strings.Join(errors, "\n")
+}
+
+// containsPsqlErrors checks if output contains actual error indicators
+func containsPsqlErrors(output string) bool {
+	lower := strings.ToLower(output)
+	return strings.Contains(lower, "error") ||
+		strings.Contains(lower, "fatal") ||
+		strings.Contains(lower, "could not")
 }
 
 func formatPgUptime(totalSecs int) string {
