@@ -5,6 +5,7 @@ import { api } from '@/lib/api';
 import Login from '@/pages/Login';
 import Dashboard from '@/pages/Dashboard';
 import Apps from '@/pages/Apps';
+import AppDetail from '@/pages/AppDetail';
 import Domains from '@/pages/Domains';
 import SSL from '@/pages/SSL';
 import Databases from '@/pages/Databases';
@@ -104,6 +105,7 @@ export default function App() {
         <Route path="/" element={<Navigate to="/dashboard" replace />} />
         <Route path="/dashboard" element={<ProtectedRoute><Dashboard /></ProtectedRoute>} />
         <Route path="/apps" element={<ProtectedRoute><Apps /></ProtectedRoute>} />
+        <Route path="/apps/:name" element={<ProtectedRoute><AppDetail /></ProtectedRoute>} />
         <Route path="/domains" element={<ProtectedRoute><Domains /></ProtectedRoute>} />
         <Route path="/ssl" element={<ProtectedRoute><SSL /></ProtectedRoute>} />
         <Route path="/databases" element={<ProtectedRoute><Databases /></ProtectedRoute>} />

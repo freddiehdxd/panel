@@ -1,4 +1,5 @@
 import { useEffect, useState, useCallback } from 'react';
+import { useNavigate } from 'react-router-dom';
 import {
   Plus, RotateCcw, ExternalLink, ChevronDown, ChevronUp,
   Github, Globe, Upload, Play, Square, Trash2, Zap,
@@ -111,6 +112,7 @@ export default function AppsPage() {
     }
   }
 
+  const navigate = useNavigate();
   const running = apps.filter((a) => a.status === 'online').length;
 
   return (
@@ -157,7 +159,7 @@ export default function AppsPage() {
               style={{ background: 'rgba(255,255,255,0.02)' }}>
               {/* Top row */}
               <div className="flex items-center justify-between">
-                <div className="flex items-center gap-4 min-w-0">
+                <div className="flex items-center gap-4 min-w-0 cursor-pointer" onClick={() => navigate(`/apps/${app.name}`)}>
                   {/* App avatar */}
                   <div className="h-10 w-10 rounded-xl flex items-center justify-center shrink-0 font-bold text-sm text-violet-300"
                     style={{ background: 'rgba(139,92,246,0.1)', border: '1px solid rgba(139,92,246,0.18)' }}>
@@ -165,7 +167,7 @@ export default function AppsPage() {
                   </div>
                   <div className="min-w-0">
                     <div className="flex items-center gap-3">
-                      <span className="font-semibold text-white text-sm">{app.name}</span>
+                      <span className="font-semibold text-white text-sm hover:text-violet-400 transition-colors">{app.name}</span>
                       <StatusBadge status={app.status} />
                       {app.domain && (
                         <a

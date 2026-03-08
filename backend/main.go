@@ -141,6 +141,7 @@ func main() {
 
 			// Logs
 			r.Get("/logs/app/{name}", logsHandler.AppLogs)
+			r.Get("/logs/app/{name}/file", logsHandler.AppLogFile)
 			r.Get("/logs/nginx", logsHandler.NginxLogs)
 
 			// Stats

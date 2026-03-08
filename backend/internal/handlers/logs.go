@@ -3,7 +3,10 @@ package handlers
 import (
 	"fmt"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strconv"
+	"strings"
 
 	"github.com/go-chi/chi/v5"
 
@@ -44,6 +47,53 @@ func (h *LogsHandler) AppLogs(w http.ResponseWriter, r *http.Request) {
 	}
 
 	Success(w, map[string]string{"log": log})
+}
+
+// AppLogFile handles GET /api/logs/app/:name/file?type=out|error&lines=N
+// Reads PM2 log files directly from disk (no subprocess) for lightweight polling.
+func (h *LogsHandler) AppLogFile(w http.ResponseWriter, r *http.Request) {
+	name := chi.URLParam(r, "name")
+
+	if !services.ValidateAppName(name) {
+		Error(w, http.StatusBadRequest, "Invalid app name")
+		return
+	}
+
+	logType := r.URL.Query().Get("type")
+	if logType != "error" {
+		logType = "out"
+	}
+
+	lines := parseLines(r)
+
+	// PM2 stores logs in ~/.pm2/logs/{name}-{out|error}.log
+	pm2Home := os.Getenv("HOME")
+	if pm2Home == "" {
+		pm2Home = "/root"
+	}
+	logFile := filepath.Join(pm2Home, ".pm2", "logs", fmt.Sprintf("%s-%s.log", name, logType))
+
+	// Check file exists
+	if _, err := os.Stat(logFile); os.IsNotExist(err) {
+		Success(w, map[string]string{
+			"log":  "",
+			"type": logType,
+			"file": logFile,
+		})
+		return
+	}
+
+	result, err := h.exec.RunBin("tail", "-n", fmt.Sprintf("%d", lines), logFile)
+	if err != nil {
+		Error(w, http.StatusInternalServerError, "Failed to read log file")
+		return
+	}
+
+	Success(w, map[string]interface{}{
+		"log":  strings.TrimSpace(result.Stdout),
+		"type": logType,
+		"file": logFile,
+	})
 }
 
 // NginxLogs handles GET /api/logs/nginx
