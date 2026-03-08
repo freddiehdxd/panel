@@ -2,7 +2,7 @@ import { useEffect, useState, useCallback } from 'react';
 import {
   Plus, RotateCcw, ExternalLink, ChevronDown, ChevronUp,
   Github, Globe, Upload, Play, Square, Trash2, Zap,
-  GitBranch, Server, MoreHorizontal, FolderArchive, Check,
+  GitBranch, Server, MoreHorizontal, FolderArchive, Check, Rocket,
 } from 'lucide-react';
 import Shell from '@/components/Shell';
 import Modal from '@/components/Modal';
@@ -221,24 +221,36 @@ export default function AppsPage() {
                       <Zap size={14} />
                     </button>
                   ) : (
-                    <label
-                      title="Upload project zip"
-                      className={`p-2 rounded-xl text-gray-600 hover:text-amber-400 hover:bg-amber-500/10 transition-all cursor-pointer ${uploading === app.name ? 'pointer-events-none' : ''}`}
-                    >
-                      {uploading === app.name
-                        ? <span className="h-3.5 w-3.5 rounded-full border-2 border-amber-400/30 border-t-amber-400 animate-spin block" />
-                        : <FolderArchive size={14} />}
-                      <input
-                        type="file"
-                        accept=".zip"
-                        className="hidden"
-                        ref={uploadRef}
-                        onChange={(e) => {
-                          const f = e.target.files?.[0];
-                          if (f) uploadProject(app.name, f);
-                        }}
-                      />
-                    </label>
+                    <>
+                      <label
+                        title="Upload project zip"
+                        className={`p-2 rounded-xl text-gray-600 hover:text-amber-400 hover:bg-amber-500/10 transition-all cursor-pointer ${uploading === app.name ? 'pointer-events-none' : ''}`}
+                      >
+                        {uploading === app.name
+                          ? <span className="h-3.5 w-3.5 rounded-full border-2 border-amber-400/30 border-t-amber-400 animate-spin block" />
+                          : <FolderArchive size={14} />}
+                        <input
+                          type="file"
+                          accept=".zip"
+                          className="hidden"
+                          ref={uploadRef}
+                          onChange={(e) => {
+                            const f = e.target.files?.[0];
+                            if (f) uploadProject(app.name, f);
+                          }}
+                        />
+                      </label>
+                      <button
+                        onClick={() => doAction(app.name, 'setup')}
+                        disabled={!!acting}
+                        title="Deploy — install, build & start"
+                        className="p-2 rounded-xl text-gray-600 hover:text-emerald-400 hover:bg-emerald-500/10 transition-all"
+                      >
+                        {acting === app.name + 'setup'
+                          ? <span className="h-3.5 w-3.5 rounded-full border-2 border-emerald-400/30 border-t-emerald-400 animate-spin block" />
+                          : <Rocket size={14} />}
+                      </button>
+                    </>
                   )}
                   <button
                     onClick={() => setExpanded(expanded === app.id ? null : app.id)}

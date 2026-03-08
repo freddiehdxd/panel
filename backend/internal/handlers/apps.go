@@ -283,6 +283,20 @@ func (h *AppsHandler) Action(w http.ResponseWriter, r *http.Request) {
 		}
 		Success(w, map[string]string{"message": "Rebuild complete"})
 
+	case "setup":
+		// Install dependencies, build, and start via PM2 (for manually uploaded apps)
+		result, err := h.exec.RunScript("setup_app.sh",
+			app.Name, fmt.Sprintf("%d", app.Port))
+		if err != nil {
+			Error(w, http.StatusInternalServerError, "Setup failed: "+err.Error())
+			return
+		}
+		if result.Code != 0 {
+			Error(w, http.StatusInternalServerError, sanitizeDeployError(result.Stderr))
+			return
+		}
+		Success(w, map[string]string{"message": "App deployed and running on port " + fmt.Sprintf("%d", app.Port)})
+
 	default:
 		Error(w, http.StatusBadRequest, "Invalid action")
 	}

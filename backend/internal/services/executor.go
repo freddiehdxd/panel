@@ -26,6 +26,7 @@ var allowedScripts = map[string]bool{
 	"install_postgres.sh": true,
 	"install_redis.sh":    true,
 	"deploy_next_app.sh":  true,
+	"setup_app.sh":        true,
 	"create_ssl.sh":       true,
 }
 
@@ -74,7 +75,7 @@ func (e *Executor) RunScript(script string, args ...string) (*models.ExecResult,
 	allArgs := append([]string{scriptPath}, args...)
 
 	timeout := defaultTimeout
-	if script == "deploy_next_app.sh" {
+	if script == "deploy_next_app.sh" || script == "setup_app.sh" {
 		timeout = deployTimeout
 	}
 
