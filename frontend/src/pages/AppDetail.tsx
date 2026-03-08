@@ -210,21 +210,7 @@ function OverviewTab({ app }: { app: App }) {
       </div>
 
       {/* Environment variables (read-only preview) */}
-      {Object.keys(app.env_vars).length > 0 && (
-        <div className="card">
-          <h3 className="text-sm font-semibold text-white mb-3">Environment Variables</h3>
-          <div className="space-y-1.5">
-            {Object.entries(app.env_vars).map(([k, v]) => (
-              <div key={k} className="flex items-center gap-2 text-xs">
-                <code className="text-violet-400 font-mono">{k}</code>
-                <span className="text-gray-700">=</span>
-                <code className="text-gray-400 font-mono truncate">{v}</code>
-              </div>
-            ))}
-          </div>
-          <p className="text-[10px] text-gray-700 mt-3">Edit in Configuration tab</p>
-        </div>
-      )}
+      <EnvPreview appName={app.name} />
     </div>
   );
 }
@@ -361,14 +347,28 @@ function LogsTab({ appName }: { appName: string }) {
 /* ─────────────────────── Configuration Tab ─────────────────────── */
 
 function ConfigTab({ app, onSaved }: { app: App; onSaved: () => void }) {
-  type EnvEntry = { key: string; value: string };
-  const [entries, setEntries] = useState<EnvEntry[]>(
-    Object.entries(app.env_vars).length > 0
-      ? Object.entries(app.env_vars).map(([key, value]) => ({ key, value }))
-      : [{ key: '', value: '' }]
-  );
+  type EnvEntry = { key: string; value: string; source?: string };
+  const [entries, setEntries] = useState<EnvEntry[]>([{ key: '', value: '' }]);
+  const [loadingEnv, setLoadingEnv] = useState(true);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
+
+  // Load env vars from disk files (.env + .env.local), falling back to DB
+  useEffect(() => {
+    (async () => {
+      setLoadingEnv(true);
+      const res = await api.get<{ vars: Record<string, string>; entries: { key: string; value: string; source: string }[] }>(`/apps/${app.name}/env-file`);
+      if (res.success && res.data && res.data.entries.length > 0) {
+        setEntries(res.data.entries.map(e => ({ key: e.key, value: e.value, source: e.source })));
+      } else if (Object.keys(app.env_vars).length > 0) {
+        // Fallback to DB values if no files on disk
+        setEntries(Object.entries(app.env_vars).map(([key, value]) => ({ key, value, source: 'database' })));
+      } else {
+        setEntries([{ key: '', value: '' }]);
+      }
+      setLoadingEnv(false);
+    })();
+  }, [app.name]); // eslint-disable-line react-hooks/exhaustive-deps
 
   async function saveEnv() {
     setSaving(true);
@@ -377,6 +377,8 @@ function ConfigTab({ app, onSaved }: { app: App; onSaved: () => void }) {
     setSaving(false);
     if (res.success) {
       setSaved(true);
+      // Clear source tags since we just wrote everything to .env
+      setEntries(prev => prev.map(e => ({ ...e, source: '.env' })));
       setTimeout(() => setSaved(false), 2000);
       onSaved();
     }
@@ -432,29 +434,52 @@ function ConfigTab({ app, onSaved }: { app: App; onSaved: () => void }) {
 
       {/* Env vars */}
       <div className="card">
-        <h3 className="text-sm font-semibold text-white mb-4">Environment Variables</h3>
-        <div className="space-y-2">
-          {entries.map((entry, i) => (
-            <div key={i} className="flex gap-2 items-center">
-              <input className="input w-5/12 font-mono text-xs" placeholder="KEY" value={entry.key}
-                onChange={e => { const n = [...entries]; n[i] = { ...n[i], key: e.target.value }; setEntries(n); }} />
-              <input className="input flex-1 font-mono text-xs" placeholder="value" value={entry.value}
-                onChange={e => { const n = [...entries]; n[i] = { ...n[i], value: e.target.value }; setEntries(n); }} />
-              <button onClick={() => { const n = entries.filter((_, j) => j !== i); setEntries(n.length ? n : [{ key: '', value: '' }]); }}
-                className="p-1.5 rounded-lg text-gray-600 hover:text-red-400 hover:bg-red-500/10 transition-all">
-                <Trash2 size={12} />
+        <div className="flex items-center justify-between mb-4">
+          <h3 className="text-sm font-semibold text-white">Environment Variables</h3>
+          <p className="text-[10px] text-gray-600">
+            Read from <code className="text-gray-500">.env</code> and <code className="text-gray-500">.env.local</code> on disk
+          </p>
+        </div>
+
+        {loadingEnv ? (
+          <div className="flex items-center gap-2 py-4 text-xs text-gray-500">
+            <span className="h-3 w-3 rounded-full border-2 border-violet-500/30 border-t-violet-500 animate-spin" />
+            Loading environment files...
+          </div>
+        ) : (
+          <>
+            <div className="space-y-2">
+              {entries.map((entry, i) => (
+                <div key={i} className="flex gap-2 items-center">
+                  <input className="input w-5/12 font-mono text-xs" placeholder="KEY" value={entry.key}
+                    onChange={e => { const n = [...entries]; n[i] = { ...n[i], key: e.target.value }; setEntries(n); }} />
+                  <input className="input flex-1 font-mono text-xs" placeholder="value" value={entry.value}
+                    onChange={e => { const n = [...entries]; n[i] = { ...n[i], value: e.target.value }; setEntries(n); }} />
+                  {entry.source && (
+                    <span className={`text-[9px] px-1.5 py-0.5 rounded shrink-0 ${
+                      entry.source === '.env.local'
+                        ? 'bg-amber-500/10 text-amber-500 border border-amber-500/20'
+                        : 'bg-violet-500/10 text-violet-400 border border-violet-500/20'
+                    }`}>{entry.source}</span>
+                  )}
+                  <button onClick={() => { const n = entries.filter((_, j) => j !== i); setEntries(n.length ? n : [{ key: '', value: '' }]); }}
+                    className="p-1.5 rounded-lg text-gray-600 hover:text-red-400 hover:bg-red-500/10 transition-all shrink-0">
+                    <Trash2 size={12} />
+                  </button>
+                </div>
+              ))}
+            </div>
+            <div className="flex items-center gap-3 mt-3">
+              <button onClick={() => setEntries([...entries, { key: '', value: '' }])} className="btn-ghost text-xs">
+                <Plus size={12} /> Add Variable
+              </button>
+              <button onClick={saveEnv} className={`text-xs ${saved ? 'btn-success' : 'btn-primary'}`} disabled={saving}>
+                {saving ? 'Saving...' : saved ? 'Saved & Restarted' : 'Save Environment'}
               </button>
             </div>
-          ))}
-        </div>
-        <div className="flex items-center gap-3 mt-3">
-          <button onClick={() => setEntries([...entries, { key: '', value: '' }])} className="btn-ghost text-xs">
-            <Plus size={12} /> Add Variable
-          </button>
-          <button onClick={saveEnv} className={`text-xs ${saved ? 'btn-success' : 'btn-primary'}`} disabled={saving}>
-            {saving ? 'Saving...' : saved ? 'Saved' : 'Save Environment'}
-          </button>
-        </div>
+            <p className="text-[10px] text-gray-700 mt-2">Saving writes to <code className="text-gray-600">.env</code>, updates the PM2 config, and restarts the app.</p>
+          </>
+        )}
       </div>
 
       {/* Danger zone */}
@@ -598,6 +623,38 @@ function DeploymentsTab({ app, onAction, acting, onRefresh }: {
 }
 
 /* ─────────────────────── Shared components ─────────────────────── */
+
+function EnvPreview({ appName }: { appName: string }) {
+  const [envEntries, setEnvEntries] = useState<{ key: string; value: string; source: string }[]>([]);
+  useEffect(() => {
+    (async () => {
+      const res = await api.get<{ entries: { key: string; value: string; source: string }[] }>(`/apps/${appName}/env-file`);
+      if (res.success && res.data?.entries?.length) setEnvEntries(res.data.entries);
+    })();
+  }, [appName]);
+
+  if (!envEntries.length) return null;
+  return (
+    <div className="card">
+      <h3 className="text-sm font-semibold text-white mb-3">Environment Variables</h3>
+      <div className="space-y-1.5">
+        {envEntries.map(e => (
+          <div key={e.key} className="flex items-center gap-2 text-xs">
+            <code className="text-violet-400 font-mono">{e.key}</code>
+            <span className="text-gray-700">=</span>
+            <code className="text-gray-400 font-mono truncate">{e.value}</code>
+            <span className={`text-[9px] px-1 py-0.5 rounded ml-auto shrink-0 ${
+              e.source === '.env.local'
+                ? 'bg-amber-500/10 text-amber-500'
+                : 'bg-violet-500/10 text-violet-400'
+            }`}>{e.source}</span>
+          </div>
+        ))}
+      </div>
+      <p className="text-[10px] text-gray-700 mt-3">Edit in Configuration tab</p>
+    </div>
+  );
+}
 
 function CopyBtn({ text }: { text: string }) {
   const [copied, setCopied] = useState(false);

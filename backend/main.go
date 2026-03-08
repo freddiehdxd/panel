@@ -111,6 +111,7 @@ func main() {
 			r.Post("/apps", appsHandler.Create)
 			r.Get("/apps/{name}", appsHandler.Get)
 			r.Post("/apps/{name}/action", appsHandler.Action)
+			r.Get("/apps/{name}/env-file", appsHandler.ReadEnvFiles)
 			r.Put("/apps/{name}/env", appsHandler.UpdateEnv)
 			r.Post("/apps/{name}/deploy-zip", appsHandler.UploadProject)
 

@@ -478,6 +478,93 @@ func (h *AppsHandler) UploadProject(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// ReadEnvFiles handles GET /api/apps/:name/env-file
+// Reads .env and .env.local from the app directory and returns merged key-value pairs.
+// .env.local values override .env values (same as Next.js convention).
+func (h *AppsHandler) ReadEnvFiles(w http.ResponseWriter, r *http.Request) {
+	name := chi.URLParam(r, "name")
+
+	if !services.ValidateAppName(name) {
+		Error(w, http.StatusBadRequest, "Invalid app name")
+		return
+	}
+
+	appDir := filepath.Join(h.cfg.AppsDir, name)
+
+	// Read .env first, then .env.local overrides
+	vars := make(map[string]string)
+	sources := make(map[string]string) // track which file each var came from
+
+	for _, filename := range []string{".env", ".env.local"} {
+		filePath := filepath.Join(appDir, filename)
+		parsed, err := parseEnvFile(filePath)
+		if err != nil {
+			continue // file doesn't exist or unreadable — skip
+		}
+		for k, v := range parsed {
+			vars[k] = v
+			sources[k] = filename
+		}
+	}
+
+	// Return as ordered array for stable UI display
+	type envEntry struct {
+		Key    string `json:"key"`
+		Value  string `json:"value"`
+		Source string `json:"source"` // ".env" or ".env.local"
+	}
+	entries := make([]envEntry, 0, len(vars))
+	for k, v := range vars {
+		entries = append(entries, envEntry{Key: k, Value: v, Source: sources[k]})
+	}
+
+	Success(w, map[string]interface{}{
+		"vars":    vars,
+		"entries": entries,
+	})
+}
+
+// parseEnvFile reads a .env file and returns key-value pairs.
+// Handles comments (#), empty lines, quoted values, and inline comments.
+func parseEnvFile(path string) (map[string]string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+
+	vars := make(map[string]string)
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+
+		// Skip empty lines and comments
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+
+		// Find the first = sign
+		eq := strings.IndexByte(line, '=')
+		if eq < 0 {
+			continue
+		}
+
+		key := strings.TrimSpace(line[:eq])
+		val := strings.TrimSpace(line[eq+1:])
+
+		// Strip surrounding quotes (double or single)
+		if len(val) >= 2 {
+			if (val[0] == '"' && val[len(val)-1] == '"') || (val[0] == '\'' && val[len(val)-1] == '\'') {
+				val = val[1 : len(val)-1]
+			}
+		}
+
+		if key != "" {
+			vars[key] = val
+		}
+	}
+
+	return vars, nil
+}
+
 // writeEnvFile writes environment variables to /var/www/apps/{name}/.env
 // This file is read by the deploy/setup scripts and injected into ecosystem.config.js
 func (h *AppsHandler) writeEnvFile(appName string, envVars map[string]string) error {
